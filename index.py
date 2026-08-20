@@ -31,7 +31,8 @@ ARCHIVO_DATOS = "registros.json"
 ARCHIVO_CLIENTE = "cliente.json"
 ARCHIVO_HISTORIAL = "historial.json"
 ARCHIVO_POS_CLIENTE = "pos_cliente.json"
-COLUMNAS = ["Serial", "Costumer", "Marca", "Modelo", "Tipo", "Status", "PO", "Usuario", "Fecha"]
+ARCHIVO_LOGS = "logs_borrado.json"
+COLUMNAS = ["Serial", "Costumer", "Marca", "Modelo", "Tipo", "Status", "PO", "Usuario", "Serial Disco", "Modelo Disco", "Capacidad", "Log Borrado", "Cert Borrado", "Fecha"]
 
 USUARIOS = {
     "admin": "admin123",
@@ -50,14 +51,23 @@ def limpiar_serial(texto):
             break
     return s
 
+def longitud_ok(s):
+    return 5 <= len(s) <= 20
+
 def detectar_marca(serial):
-    if re.match(r'^[A-Z0-9]{7}$', serial): return 'DELL'
     if serial.startswith('PF') or 'LNV' in serial or re.match(r'^[A-Z]{2}[0-9]', serial): return 'LENOVO'
+    if re.match(r'^[A-Z0-9]{7}$', serial): return 'DELL'
     if re.match(r'^[A-Z0-9]{8,10}$', serial): return 'HP'
     return 'DESCONOCIDA'
 
 def detectar_tipo(modelo):
     m = str(modelo).lower()
+    if any(x in m for x in ["monitor", "pantalla", "thinkvision", "e2216", "p2419", "u2415", "p24h"]):
+        return "MONITOR"
+    if any(x in m for x in ["phone", "celular", "smartphone", "moto g", "galaxy a", "galaxy s", "redmi", "iphone"]):
+        return "CELULAR"
+    if any(x in m for x in ["tablet", "ipad", "tab m", "tab p"]):
+        return "TABLETA"
     if any(x in m for x in ["laptop", "notebook", "thinkpad", "ideapad", "elitebook", "probook", "latitude", "inspiron", "xps", "spectre", "envy", "yoga"]):
         return "LAPTOP"
     if any(x in m for x in ["desktop", "optiplex", "thinkcentre", "prodesk", "tower", "all-in-one"]):
@@ -74,10 +84,33 @@ def consultar_dell(serial):
     except Exception:
         return ""
 
+def consultar_lenovo(serial):
+    try:
+        url = f"https://pcsupport.lenovo.com/us/en/api/v1/warranty?serial={serial}"
+        r = requests.get(url, timeout=8, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+        texto = json.dumps(r.json())
+        m = re.search(r'(ThinkPad|ThinkCentre|IdeaPad|IdeaCentre|Legion|Yoga)\s+[A-Z0-9]{1,6}', texto)
+        if m:
+            return m.group(0)
+    except Exception:
+        pass
+    try:
+        url2 = f"https://pcsupport.lenovo.com/us/en/warranty/{serial}"
+        r2 = requests.get(url2, timeout=8, headers={"User-Agent": "Mozilla/5.0"})
+        m2 = re.search(r'(ThinkPad|ThinkCentre|IdeaPad|IdeaCentre|Legion|Yoga)\s+[A-Z0-9]{1,6}', r2.text)
+        if m2:
+            return m2.group(0)
+    except Exception:
+        pass
+    return ""
+
 def norm_tipo(t):
     t = str(t).upper()
     if "LAPTOP" in t or "NOTEBOOK" in t: return "LAPTOP"
     if "CPU" in t or "PC" in t or "DESKTOP" in t or "TOWER" in t: return "CPU"
+    if "MONITOR" in t: return "MONITOR"
+    if "CELULAR" in t or "PHONE" in t: return "CELULAR"
+    if "TABLET" in t: return "TABLETA"
     if t in ("", "NAN", "NONE"): return ""
     return "OTHER"
 
@@ -94,7 +127,7 @@ def detectar_col_serial(df):
         puntaje = 0
         for val in df[col].dropna().astype(str).head(20):
             s = limpiar_serial(val)
-            if 7 <= len(s) <= 10 and re.match(r'^[A-Z0-9]+$', s):
+            if longitud_ok(s) and re.match(r'^[A-Z0-9]+$', s):
                 puntaje += 1
         if puntaje > mejor_puntaje:
             mejor_puntaje = puntaje
@@ -130,6 +163,47 @@ def leer_pdf_seriales(bytes_arch):
         seriales = [t for t in tokens if parece_serial(t)]
         origen = "OCR (escaneado)"
     return sorted(set(seriales)), origen
+
+def leer_log_xerase(raw):
+    def campo(clave):
+        m = re.search(rf"^\s*{clave}\s*:\s*(.*)$", raw, re.IGNORECASE | re.MULTILINE)
+        return m.group(1).strip() if m else ""
+    capacidad = campo("Capacity")
+    m_cap = re.search(r'([0-9]+(?:\.[0-9]+)?\s?(?:GB|TB|MB))', capacidad, re.IGNORECASE)
+    if m_cap:
+        capacidad = m_cap.group(1).upper().replace(" ", "")
+    sys_sn = campo("System Serial Number")
+    if not re.match(r'^[A-Z0-9]{5,15}$', sys_sn or ""):
+        sys_sn = ""
+    return {
+        "fabricante_disco": campo("Manufacturer"),
+        "modelo_disco": campo("Model"),
+        "serial_disco": campo("Serial Number"),
+        "capacidad": capacidad,
+        "grade": campo("Grade"),
+        "ispf": campo("ISPF"),
+        "system_sn": sys_sn,
+        "system_model": campo("System Model"),
+        "resultado": "Passed" if re.search(r'Erasure Results\s*:.*Passed', raw, re.IGNORECASE | re.DOTALL) else "",
+    }
+
+def leer_certificado_xerase(bytes_arch):
+    doc = fitz.open(stream=bytes_arch, filetype="pdf")
+    filas = []
+    encabezados = None
+    for pagina in doc:
+        for t in pagina.find_tables().tables:
+            for row in t.extract():
+                if not row or all(c is None for c in row):
+                    continue
+                celdas = [str(c).replace("\n", " ").strip() if c else "" for c in row]
+                up = [c.upper() for c in celdas]
+                if "SERIALNUM" in up and "SYSTEM_SN" in up:
+                    encabezados = up
+                    continue
+                if encabezados and re.match(r'^\d{1,2}/\d{1,2}/\d{2,4}', celdas[0]):
+                    filas.append(dict(zip(encabezados, celdas)))
+    return filas
 
 def cargar_datos():
     if os.path.exists(ARCHIVO_DATOS):
@@ -296,7 +370,7 @@ if st.session_state.get("recargar_po") and st.session_state.get("archivo_bytes")
                     nuevas = []
                     for _, r in dft.iterrows():
                         s = limpiar_serial(r[col_ser])
-                        if len(s) in (7, 8, 9) and s not in existentes:
+                        if longitud_ok(s) and s not in existentes:
                             existentes.add(s)
                             nuevas.append({"Serial": s, "Costumer": "", "Marca": detectar_marca(s), "Modelo": "",
                                            "Tipo": "", "Status": "Importado de Excel", "PO": st.session_state.po_actual or "IMPORTADO",
@@ -310,7 +384,7 @@ if st.session_state.get("recargar_po") and st.session_state.get("archivo_bytes")
             col_det = dfc_nueva.columns[0]
         validos = 0
         if col_det is not None:
-            validos = sum(1 for v in dfc_nueva[col_det].dropna() if len(limpiar_serial(v)) in (7, 8, 9, 10))
+            validos = sum(1 for v in dfc_nueva[col_det].dropna() if longitud_ok(limpiar_serial(v)))
         st.session_state["xray"] = (
             f"Archivo: {nombre}\n"
             f"Hojas: {hojas}\n"
@@ -356,7 +430,7 @@ if st.sidebar.button("🗑️ Reiniciar todos los datos"):
     st.session_state["xray"] = None
     st.session_state["archivo_bytes"] = None
     st.session_state["skip_po"] = 1
-    for f in [ARCHIVO_CLIENTE, ARCHIVO_HISTORIAL, ARCHIVO_POS_CLIENTE]:
+    for f in [ARCHIVO_CLIENTE, ARCHIVO_HISTORIAL, ARCHIVO_POS_CLIENTE, ARCHIVO_LOGS]:
         if os.path.exists(f):
             os.remove(f)
     st.sidebar.info("Sistema reiniciado por completo")
@@ -409,14 +483,14 @@ else:
 tipos_esc = df["Tipo"].map(norm_tipo)
 pc_esc = int((tipos_esc == "CPU").sum())
 lap_esc = int((tipos_esc == "LAPTOP").sum())
-oth_esc = int((tipos_esc == "OTHER").sum())
+oth_esc = int(tipos_esc.isin(["OTHER", "MONITOR", "CELULAR", "TABLETA"]).sum())
 
 pc_cli = lap_cli = oth_cli = 0
 if dfc is not None and col_tipo_cliente:
     tipos_cli = dfc[col_tipo_cliente].map(norm_tipo)
     pc_cli = int((tipos_cli == "CPU").sum())
     lap_cli = int((tipos_cli == "LAPTOP").sum())
-    oth_cli = int((tipos_cli == "OTHER").sum())
+    oth_cli = int(tipos_cli.isin(["OTHER", "MONITOR", "CELULAR", "TABLETA"]).sum())
 
 progreso = (interno / cliente) if cliente else 0
 
@@ -455,8 +529,8 @@ with tab1:
     if enviar and serial_txt:
         serial = limpiar_serial(serial_txt)
         existentes = set(df["Serial"])
-        if len(serial) not in (7, 8, 9):
-            st.error(f"⚠️ LONGITUD INCORRECTA: {len(serial)} caracteres. Debe ser 7, 8 o 9.")
+        if not longitud_ok(serial):
+            st.error(f"⚠️ LONGITUD INCORRECTA: {len(serial)} caracteres. Debe ser entre 5 y 20.")
         elif serial in existentes:
             fila = df[df["Serial"] == serial].iloc[0]
             po_previa = fila["PO"] or "SIN PO"
@@ -509,7 +583,7 @@ with tab2:
             serial = limpiar_serial(linea)
             if not serial:
                 continue
-            if len(serial) not in (7, 8, 9):
+            if not longitud_ok(serial):
                 mal += 1
                 continue
             if serial in existentes:
@@ -559,14 +633,14 @@ if ba.button("🔗 Rellenar desde base cliente"):
     else:
         st.warning("Primero sube la base cliente en la barra lateral.")
 
-if bb.button("🔍 Consultar modelos Dell (API)"):
-    pendientes = st.session_state.df[(st.session_state.df["Marca"] == "DELL") & (st.session_state.df["Modelo"] == "")]
+if bb.button("🔍 Consultar modelos (Dell + Lenovo)"):
+    pendientes = st.session_state.df[(st.session_state.df["Modelo"] == "") & (st.session_state.df["Marca"].isin(["DELL", "LENOVO"]))]
     if len(pendientes) == 0:
-        st.info("No hay Dell pendientes de consulta.")
+        st.info("No hay Dell/Lenovo pendientes de consulta.")
     else:
         bar = st.progress(0)
         for n, (idx, row) in enumerate(pendientes.iterrows()):
-            modelo = consultar_dell(row["Serial"])
+            modelo = consultar_dell(row["Serial"]) if row["Marca"] == "DELL" else consultar_lenovo(row["Serial"])
             if modelo:
                 st.session_state.df.at[idx, "Modelo"] = modelo
                 t = detectar_tipo(modelo)
@@ -576,7 +650,7 @@ if bb.button("🔍 Consultar modelos Dell (API)"):
             bar.progress((n + 1) / len(pendientes))
             time.sleep(1)
         guardar_datos(st.session_state.df)
-        st.success("Consulta Dell terminada ✅")
+        st.success("Consulta Dell/Lenovo terminada ✅")
         st.rerun()
 
 df_final = st.session_state.df
@@ -595,6 +669,111 @@ if st.button("💾 Guardar cambios de la tabla"):
     guardar_datos(st.session_state.df)
     st.success("Cambios guardados ✅")
     st.rerun()
+
+# ================= FASE 2: LOGS XERASE (TXT) =================
+st.divider()
+st.markdown("## 💾 FASE 2 — LOGS DE BORRADO XERASE (TXT)")
+st.caption("Sube los .txt de la USB (todos juntos). Extrae: fabricante, modelo y serial de disco, capacidad, grado e ISPF.")
+
+logs_borrado = cargar_json(ARCHIVO_LOGS)
+
+log_files = st.file_uploader("Subir logs Xerase (TXT/LOG)", type=["txt", "log"], accept_multiple_files=True, key="logs")
+if log_files:
+    for lf in log_files:
+        if lf.name in st.session_state.get("logs_procesados", set()):
+            continue
+        st.session_state.setdefault("logs_procesados", set()).add(lf.name)
+        raw = lf.getvalue().decode("utf-8", errors="ignore")
+        d = leer_log_xerase(raw)
+        clave = d["serial_disco"] or lf.name
+        logs_borrado[clave] = d
+        guardar_json(ARCHIVO_LOGS, logs_borrado)
+        msg = ""
+        if d["ispf"]:
+            idxs = st.session_state.df[st.session_state.df["Serial"] == limpiar_serial(d["ispf"])].index
+            if len(idxs) > 0:
+                i = idxs[0]
+                if d["serial_disco"]:
+                    st.session_state.df.at[i, "Serial Disco"] = d["serial_disco"]
+                if d["modelo_disco"]:
+                    st.session_state.df.at[i, "Modelo Disco"] = f"{d['fabricante_disco']} {d['modelo_disco']}".strip()
+                if d["capacidad"]:
+                    st.session_state.df.at[i, "Capacidad"] = d["capacidad"]
+                st.session_state.df.at[i, "Log Borrado"] = (d["grade"] or "Procesado") + " | " + datetime.now().strftime("%Y-%m-%d")
+                guardar_datos(st.session_state.df)
+                msg = f" → Enlazado con la tabla vía ISPF ({d['ispf']})."
+        with st.expander(f"📄 {lf.name} → Disco: {d['serial_disco'] or '—'} | {d['modelo_disco'] or '—'} | {d['capacidad'] or '—'} | {d['grade'] or '—'}"):
+            st.code(raw[:800])
+        st.success(f"✅ Log {lf.name} guardado en memoria.{msg}")
+
+# ================= FASE 3: CERTIFICADO XERASE (PDF) =================
+st.divider()
+st.markdown("## 📜 FASE 3 — CERTIFICADO XERASE (Comparación final)")
+st.caption("Sube el PDF. Compara cada disco y equipo contra tus logs (Fase 2) y contra tu TABLA CAPTURA.")
+
+cert_files = st.file_uploader("Subir certificado Xerase (PDF)", type=["pdf"], accept_multiple_files=True, key="certs")
+if cert_files:
+    discos_cert = set()
+    for cf in cert_files:
+        if cf.name in st.session_state.get("certs_procesados", set()):
+            continue
+        st.session_state.setdefault("certs_procesados", set()).add(cf.name)
+        filas = leer_certificado_xerase(cf.getvalue())
+        if not filas:
+            st.error(f"❌ {cf.name}: no se detectó la tabla del certificado.")
+            continue
+        ok_tabla = 0
+        sin_tabla = []
+        sin_log = []
+        for fila in filas:
+            serial_disco = fila.get("SERIALNUM", "")
+            system_sn = limpiar_serial(fila.get("SYSTEM_SN", ""))
+            system_model = fila.get("SYSTEM_MODEL", "")
+            grade = fila.get("GRADE", "")
+            status = fila.get("STATUS", "")
+            cap_cert = fila.get("CAPACITY", "")
+            discos_cert.add(serial_disco)
+            log = logs_borrado.get(serial_disco, {})
+            if not log:
+                sin_log.append(serial_disco)
+            aviso_cap = ""
+            if log and log.get("capacidad") and cap_cert and log["capacidad"] != cap_cert:
+                aviso_cap = f" ⚠️ Capacidad distinta: log {log['capacidad']} vs certificado {cap_cert}."
+            if system_sn:
+                idxs = st.session_state.df[st.session_state.df["Serial"] == system_sn].index
+                if len(idxs) > 0:
+                    i = idxs[0]
+                    ok_tabla += 1
+                    if system_model and str(st.session_state.df.at[i, "Modelo"]) in ("", "nan"):
+                        st.session_state.df.at[i, "Modelo"] = system_model
+                        t = detectar_tipo(system_model)
+                        if t:
+                            st.session_state.df.at[i, "Tipo"] = t
+                    if serial_disco:
+                        st.session_state.df.at[i, "Serial Disco"] = serial_disco
+                    if cap_cert:
+                        st.session_state.df.at[i, "Capacidad"] = cap_cert
+                    if log.get("modelo_disco"):
+                        st.session_state.df.at[i, "Modelo Disco"] = f"{log.get('fabricante_disco', '')} {log['modelo_disco']}".strip()
+                    if log.get("grade"):
+                        st.session_state.df.at[i, "Log Borrado"] = log["grade"]
+                    st.session_state.df.at[i, "Cert Borrado"] = f"{status} {grade}".strip() + " | " + datetime.now().strftime("%Y-%m-%d")
+                    if aviso_cap:
+                        st.warning(f"⚠️ Equipo {system_sn}:{aviso_cap}")
+                else:
+                    sin_tabla.append(system_sn)
+        guardar_datos(st.session_state.df)
+        st.success(f"✅ {cf.name}: {len(filas)} discos leídos | {ok_tabla} equipos cotejados con tu tabla.")
+        if sin_tabla:
+            st.warning(f"⚠️ Equipos del certificado NO registrados en tu tabla: {', '.join(sorted(set(sin_tabla)))}")
+        if sin_log:
+            st.warning(f"⚠️ Discos en certificado SIN log de la Fase 2: {', '.join(sorted(set(sin_log)))}")
+    discos_logs = {v["serial_disco"] for v in logs_borrado.values() if v.get("serial_disco")}
+    sin_cert = discos_logs - discos_cert
+    if discos_cert and sin_cert:
+        st.warning(f"⚠️ Discos con log que NO aparecen en el certificado: {', '.join(sorted(sin_cert))}")
+    elif discos_cert:
+        st.success("✅ Todos los discos de tus logs aparecen en el certificado. Cotejo completo.")
 
 # ================= REPORTE FINAL IMPRIMIBLE =================
 import streamlit.components.v1 as components
