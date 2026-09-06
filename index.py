@@ -32,7 +32,7 @@ except Exception:
     PLOTLY_OK = False
 
 # ================= CONFIGURACIÓN =================
-st.set_page_config(page_title="Sistema Inventario TCG", page_icon="🖥️", layout="wide")
+st.set_page_config(page_title="Sistema de Inventario TCG/E-TEST", page_icon="🖥️", layout="wide")
 
 ARCHIVO_DATOS = "registros.json"
 ARCHIVO_CLIENTE = "cliente.json"
@@ -41,11 +41,12 @@ ARCHIVO_POS_CLIENTE = "pos_cliente.json"
 ARCHIVO_LOGS = "logs_borrado.json"
 ARCHIVO_USUARIOS = "usuarios.json"
 ARCHIVO_ALERTAS = "alertas.json"
+ARCHIVO_POS_REG = "pos_registro.json"
+ARCHIVO_CERRADAS = "po_cerradas.json"
 COLUMNAS = ["Serial", "Costumer", "Marca", "Modelo", "Tipo", "Status", "PO", "Usuario", "Serial Disco", "Modelo Disco", "Capacidad", "Log Borrado", "Cert Borrado", "Fecha"]
 
 USUARIOS_BASE = {
     "admin": "admin123",
-    "enrique": "weba2026",
 }
 
 # ================= FUNCIONES =================
@@ -403,6 +404,21 @@ def agregar_alerta(serial, usuario, po_intento, po_correcta, tipo):
     })
     guardar_json(ARCHIVO_ALERTAS, alertas)
 
+def registrar_po(nombre, usuario, con_base=False, declarados=0):
+    reg = cargar_json(ARCHIVO_POS_REG)
+    if not isinstance(reg, dict):
+        reg = {}
+    if nombre and nombre not in reg:
+        reg[nombre] = {
+            "inicio": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "usuario": usuario,
+            "con_base": con_base,
+            "declarados": declarados,
+            "estado": "ABIERTA",
+        }
+        guardar_json(ARCHIVO_POS_REG, reg)
+    return reg
+
 def mostrar_logo(grande=False):
     if os.path.exists("logo.png"):
         with open("logo.png", "rb") as f:
@@ -443,7 +459,7 @@ if not st.session_state.logged_in:
         st.markdown("<br>", unsafe_allow_html=True)
         mostrar_logo(grande=True)
         st.markdown("<div class='bienvenido'>¡BIENVENIDO!</div>", unsafe_allow_html=True)
-        st.markdown("<div class='sub'>Sistema de Inventario de Equipos — Inicia sesión</div>", unsafe_allow_html=True)
+        st.markdown("<div class='sub'>Sistema de Inventario TCG/E-TEST — Inicia sesión</div>", unsafe_allow_html=True)
         st.markdown("<br>", unsafe_allow_html=True)
         usuario = st.text_input("👤 Usuario")
         password = st.text_input("🔑 Contraseña", type="password")
@@ -472,6 +488,9 @@ else:
 
 historial = cargar_json(ARCHIVO_HISTORIAL)
 pos_cliente = cargar_json(ARCHIVO_POS_CLIENTE)
+pos_reg = cargar_json(ARCHIVO_POS_REG)
+if not isinstance(pos_reg, dict):
+    pos_reg = {}
 
 mapa_pos_cliente = {}
 for po, regs in pos_cliente.items():
@@ -497,8 +516,56 @@ if st.sidebar.button("🚪 Cerrar sesión"):
     st.rerun()
 st.sidebar.divider()
 
-po_input = st.sidebar.text_input("🏷️ PO / Proyecto activo", value=st.session_state.po_actual, placeholder="Ej: PO_BANCO_2026")
-st.session_state.po_actual = po_input.strip().upper()
+pos_abiertas_reg = sorted([p for p in pos_reg.keys() if pos_reg[p].get("estado", "ABIERTA") == "ABIERTA"])
+pos_sin_reg = sorted([p for p in set(st.session_state.df["PO"]) if p and p != "SIN_PO" and p not in pos_reg])
+
+if es_admin:
+    opciones = ["(selecciona una PO)"] + pos_abiertas_reg + pos_sin_reg + ["➕ CREAR PO NUEVA..."]
+else:
+    opciones = ["(selecciona una PO)"] + pos_abiertas_reg + pos_sin_reg
+if not opciones:
+    opciones = ["(sin POs activas)"]
+
+idx_po = 0
+if st.session_state.po_actual in opciones:
+    idx_po = opciones.index(st.session_state.po_actual)
+po_sel = st.sidebar.selectbox("🏷️ PO / Proyecto activo", opciones, index=idx_po)
+
+if po_sel == "➕ CREAR PO NUEVA...":
+    nombre_nuevo = st.sidebar.text_input("Nombre de la PO nueva", placeholder="Ej: PO_SORIANA_2026")
+    if st.sidebar.button("📝 Iniciar PO"):
+        nn = nombre_nuevo.strip().upper().replace(" ", "_")
+        if nn:
+            registrar_po(nn, st.session_state.usuario)
+            st.session_state.po_actual = nn
+            st.sidebar.success(f"PO '{nn}' iniciada ✅")
+            st.rerun()
+        else:
+            st.sidebar.error("Escribe un nombre para la PO.")
+    st.session_state.po_actual = ""
+elif po_sel in ("(selecciona una PO)", "(sin POs activas)"):
+    st.session_state.po_actual = ""
+    st.sidebar.info("Selecciona una PO para trabajar. La captura está deshabilitada hasta que tomes una.")
+else:
+    st.session_state.po_actual = po_sel
+    reg_t = cargar_json(ARCHIVO_POS_REG)
+    if not isinstance(reg_t, dict):
+        reg_t = {}
+    if po_sel in reg_t and not reg_t[po_sel].get("tomada_por"):
+        reg_t[po_sel]["tomada_por"] = st.session_state.usuario
+        reg_t[po_sel]["tomada_fecha"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        guardar_json(ARCHIVO_POS_REG, reg_t)
+        pos_reg = reg_t
+        st.sidebar.success(f"🎯 Tomaste la PO {po_sel}")
+    if po_sel in pos_sin_reg and es_admin and st.sidebar.button("📝 Registrar como iniciada", key="btn_reg_det"):
+        registrar_po(po_sel, st.session_state.usuario)
+        st.rerun()
+    info_po = pos_reg.get(po_sel, {})
+    if info_po:
+        st.sidebar.caption(f"📅 Iniciada: {info_po.get('inicio', '—')} por {info_po.get('usuario', '—')}")
+        st.sidebar.caption(f"📦 Base cliente: {'SÍ (' + str(info_po.get('declarados', 0)) + ' declarados)' if info_po.get('con_base') else 'NO (desde cero)'}")
+        if info_po.get("tomada_por"):
+            st.sidebar.caption(f"🎯 Tomada por: {info_po['tomada_por']} ({info_po.get('tomada_fecha', '')})")
 
 pos_existentes = sorted(set(st.session_state.df["PO"])) if len(st.session_state.df) else []
 if es_admin:
@@ -586,6 +653,10 @@ if st.session_state.get("recargar_po") and st.session_state.get("archivo_bytes")
         st.session_state.df_cliente.to_json(ARCHIVO_CLIENTE, orient="records")
         pos_cliente[nombre_po] = dfc_nueva.to_dict(orient="records")
         guardar_json(ARCHIVO_POS_CLIENTE, pos_cliente)
+        reg_tmp = registrar_po(nombre_po, st.session_state.usuario, con_base=True, declarados=len(dfc_nueva))
+        reg_tmp[nombre_po]["con_base"] = True
+        reg_tmp[nombre_po]["declarados"] = len(dfc_nueva)
+        guardar_json(ARCHIVO_POS_REG, reg_tmp)
         st.session_state["recargar_po"] = False
         st.sidebar.success(f"✅ PO '{nombre_po}' cargada (seriales válidos: {validos})")
         st.rerun()
@@ -615,7 +686,7 @@ if st.sidebar.button("🗑️ Reiniciar todos los datos"):
     st.session_state["xray"] = None
     st.session_state["archivo_bytes"] = None
     st.session_state["skip_po"] = 1
-    for f in [ARCHIVO_CLIENTE, ARCHIVO_HISTORIAL, ARCHIVO_POS_CLIENTE, ARCHIVO_LOGS, ARCHIVO_ALERTAS]:
+    for f in [ARCHIVO_CLIENTE, ARCHIVO_HISTORIAL, ARCHIVO_POS_CLIENTE, ARCHIVO_LOGS, ARCHIVO_ALERTAS, ARCHIVO_POS_REG]:
         if os.path.exists(f):
             os.remove(f)
     st.sidebar.info("Sistema reiniciado por completo")
@@ -625,7 +696,7 @@ ca, cb = st.columns([1, 5])
 with ca:
     mostrar_logo()
 with cb:
-    st.title("Sistema de Inventario TCG")
+    st.title("Sistema de Inventario TCG/E-TEST")
     st.success(f"👋 ¡Bienvenido, {st.session_state.usuario.upper()}! | 🏷️ PO activa: {st.session_state.po_actual or 'SIN PO'} | 🔎 Vista: {po_vista}")
 
 # ================= ALERTAS DE EQUIPOS REVUELTOS =================
@@ -740,6 +811,32 @@ c1.metric("Laptops Escaneada", lap_esc)
 c2.metric("Laptop Total PO Cliente", lap_cli if cliente else "—")
 c3.metric("Others Escaneada", oth_esc)
 c4.metric("Other Cliente", oth_cli if cliente else "—")
+
+# ================= REGISTRO DE POs =================
+st.divider()
+st.markdown("## 📋 REGISTRO DE POs (estado de proyectos)")
+st.caption("Libro de proyectos: qué POs están iniciadas, quién las inició, quién las tomó, si tienen base del cliente o son desde cero, y su avance.")
+rows_reg = []
+for po in sorted(set(list(pos_reg.keys()) + list(set(df["PO"])))):
+    if not po or po == "SIN_PO":
+        continue
+    info = pos_reg.get(po, {})
+    capt = len(df[df["PO"] == po])
+    decl = info.get("declarados", 0) or len(pos_cliente.get(po, []))
+    rows_reg.append({
+        "PO": po,
+        "Iniciada": info.get("inicio", "sin registrar"),
+        "Por": info.get("usuario", "—"),
+        "Tomada por": info.get("tomada_por", "— nadie aún —"),
+        "Base cliente": f"CON BASE ({decl})" if (info.get("con_base") or po in pos_cliente) else "SIN BASE (desde cero)",
+        "Capturados": capt,
+        "Avance": f"{capt / decl:.0%}" if decl else "—",
+        "Estado": info.get("estado", "ABIERTA"),
+    })
+if rows_reg:
+    st.dataframe(pd.DataFrame(rows_reg), use_container_width=True, hide_index=True)
+else:
+    st.info("Aún no hay POs registradas. El admin puede crear una en la barra lateral.")
 
 # ================= ESTADÍSTICAS Y GRÁFICAS =================
 st.divider()
@@ -873,9 +970,7 @@ if es_admin:
         st.markdown("**Usuarios base (del código):**")
         for u in USUARIOS_BASE:
             if u == "admin":
-                st.write(f"👑 {u} — protegido")
-            else:
-                st.write(f"🔒 {u} — usuario base")
+                st.write(f"👑 {u} — protegido (dueño del sistema)")
         st.markdown("**Usuarios creados por admin:**")
         if usuarios_locales:
             for u in list(usuarios_locales.keys()):
@@ -942,7 +1037,9 @@ with tab1:
     if enviar and serial_txt:
         serial = limpiar_serial(serial_txt)
         existentes = set(df["Serial"])
-        if not longitud_ok(serial):
+        if not st.session_state.po_actual:
+            st.error("🏷️ Primero selecciona/toma una PO en la barra lateral.")
+        elif not longitud_ok(serial):
             st.error(f"⚠️ LONGITUD INCORRECTA: {len(serial)} caracteres. Debe ser entre 5 y 20.")
         elif serial in existentes:
             fila = df[df["Serial"] == serial].iloc[0]
@@ -962,6 +1059,8 @@ with tab1:
             else:
                 status_nuevo = "Pendiente"
             po_nueva = st.session_state.po_actual or "SIN_PO"
+            if po_nueva != "SIN_PO":
+                registrar_po(po_nueva, st.session_state.usuario)
             nueva = pd.DataFrame([{
                 "Serial": serial, "Costumer": costumer_txt.strip().upper(), "Marca": detectar_marca(serial),
                 "Modelo": "", "Tipo": "", "Status": status_nuevo, "PO": po_nueva,
@@ -989,11 +1088,15 @@ with tab2:
     with st.form("form_masiva"):
         texto = st.text_area("Pega los seriales aquí (uno por línea)")
         enviar2 = st.form_submit_button("✅ Registrar todos")
-    if enviar2 and texto:
+    if enviar2 and texto and not st.session_state.po_actual:
+        st.error("🏷️ Primero selecciona/toma una PO en la barra lateral.")
+    elif enviar2 and texto:
         existentes = set(df["Serial"])
         nuevas = []
         ok = dup = mal = 0
         po_nueva = st.session_state.po_actual or "SIN_PO"
+        if po_nueva != "SIN_PO":
+            registrar_po(po_nueva, st.session_state.usuario)
         for linea in texto.splitlines():
             serial = limpiar_serial(linea)
             if not serial:
@@ -1252,9 +1355,8 @@ if conv_files:
         pd.DataFrame(df_edit).to_excel(buf, index=False, engine="openpyxl")
         st.download_button(f"⬇️ Descargar Excel de {cf.name}", data=buf.getvalue(),
                            file_name=f"{os.path.splitext(cf.name)[0]}_convertido.xlsx", key=f"dl_{cf.name}")
-# ================= CIERRE Y ARCHIVO DE POs (SOLO ADMIN) =================
-ARCHIVO_CERRADAS = "po_cerradas.json"
 
+# ================= CIERRE Y ARCHIVO DE POs (SOLO ADMIN) =================
 if es_admin:
     st.divider()
     st.markdown("## 🗄️ CIERRE DE PO (archivar y revisar después)")
@@ -1285,6 +1387,10 @@ if es_admin:
                     "filas": filas_po.to_dict(orient="records"),
                 }
                 guardar_json(ARCHIVO_CERRADAS, cerradas)
+                reg_c = cargar_json(ARCHIVO_POS_REG)
+                if isinstance(reg_c, dict) and po_cerrar in reg_c:
+                    reg_c[po_cerrar]["estado"] = "CERRADA"
+                    guardar_json(ARCHIVO_POS_REG, reg_c)
                 st.session_state.df = df[df["PO"] != po_cerrar].reset_index(drop=True)
                 guardar_datos(st.session_state.df)
                 st.success(f"PO '{po_cerrar}' cerrada y archivada ✅")
@@ -1308,6 +1414,7 @@ if es_admin:
                                file_name=f"PO_CERRADA_{po_ver}.xlsx", key=f"dl_cerrada_{po_ver}")
         else:
             st.info("Aún no hay POs cerradas.")
+
 # ================= REPORTE FINAL IMPRIMIBLE =================
 import streamlit.components.v1 as components
 
@@ -1323,7 +1430,7 @@ st.markdown("""
 
 st.divider()
 st.markdown("## 📊 REPORTE FINAL POR PO")
-st.caption(f"PO activa: {st.session_state.po_actual or 'SIN PO'} | Vista: {po_vista} | Estado actual del proyecto.")
+st.caption(f"Sistema de Inventario TCG/E-TEST | PO activa: {st.session_state.po_actual or 'SIN PO'} | Vista: {po_vista}")
 
 r1, r2, r3, r4 = st.columns(4)
 r1.metric("Equipos Totales", interno)
