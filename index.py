@@ -7,6 +7,7 @@ import os
 import time
 import json
 import base64
+import zipfile
 from datetime import datetime
 from PIL import Image
 
@@ -24,6 +25,12 @@ try:
 except Exception:
     OCR_OK = False
 
+try:
+    import plotly.express as px
+    PLOTLY_OK = True
+except Exception:
+    PLOTLY_OK = False
+
 # ================= CONFIGURACIÓN =================
 st.set_page_config(page_title="Sistema Inventario TCG", page_icon="🖥️", layout="wide")
 
@@ -32,9 +39,11 @@ ARCHIVO_CLIENTE = "cliente.json"
 ARCHIVO_HISTORIAL = "historial.json"
 ARCHIVO_POS_CLIENTE = "pos_cliente.json"
 ARCHIVO_LOGS = "logs_borrado.json"
+ARCHIVO_USUARIOS = "usuarios.json"
+ARCHIVO_ALERTAS = "alertas.json"
 COLUMNAS = ["Serial", "Costumer", "Marca", "Modelo", "Tipo", "Status", "PO", "Usuario", "Serial Disco", "Modelo Disco", "Capacidad", "Log Borrado", "Cert Borrado", "Fecha"]
 
-USUARIOS = {
+USUARIOS_BASE = {
     "admin": "admin123",
     "enrique": "weba2026",
 }
@@ -187,23 +196,163 @@ def leer_log_xerase(raw):
         "resultado": "Passed" if re.search(r'Erasure Results\s*:.*Passed', raw, re.IGNORECASE | re.DOTALL) else "",
     }
 
+def leer_certificado_por_posicion(doc):
+    conocidos = {"DATE", "TIME", "SERIALNUM", "MODEL", "CAPACITY", "DEVICE", "TYPE",
+                 "SYSTEM_MFG", "SYSTEM_MODEL", "SYSTEM_SN", "VER", "ERASURE_METHOD", "GRADE", "STATUS"}
+    filas = []
+    for pagina in doc:
+        words = pagina.get_text("words")
+        if not words:
+            continue
+        lineas = {}
+        for w in words:
+            clave = round(w[1] / 4)
+            lineas.setdefault(clave, []).append(w)
+        claves = sorted(lineas.keys())
+        k_header = None
+        for k in claves:
+            ws = sorted(lineas[k], key=lambda w: w[0])
+            junta = " ".join(w[4].upper() for w in ws)
+            if "SERIALNUM" in junta and "SYSTEM_SN" in junta:
+                k_header = k
+                break
+        if k_header is None:
+            continue
+        anclas = []
+        for kk in [k_header - 1, k_header, k_header + 1]:
+            for w in lineas.get(kk, []):
+                t = w[4].upper()
+                if t in conocidos:
+                    anclas.append([w[0], t])
+        anclas.sort(key=lambda a: a[0])
+        nombres = []
+        xs = []
+        for x, n in anclas:
+            if n == "TYPE":
+                continue
+            if n == "DEVICE":
+                n = "DEVICE_TYPE"
+            if n in nombres:
+                n = n + "_2"
+            nombres.append(n)
+            xs.append(x)
+        if not nombres:
+            continue
+
+        def col_de(x):
+            idx = 0
+            for i in range(len(xs)):
+                if x >= xs[i] - 3:
+                    idx = i
+            while idx < len(xs) - 1:
+                gap = xs[idx + 1] - xs[idx]
+                slack = max(4.0, 0.2 * gap)
+                if x >= xs[idx + 1] - slack:
+                    idx += 1
+                else:
+                    break
+            return nombres[idx]
+
+        fila = None
+        for k in claves:
+            ws = sorted(lineas[k], key=lambda w: w[0])
+            junta = " ".join(w[4] for w in ws)
+            if junta.strip().lower().startswith("page"):
+                continue
+            es_fecha = bool(re.match(r'^\d{1,2}/\d{1,2}/\d{2,4}', ws[0][4])) and col_de(ws[0][0]) == "DATE"
+            if es_fecha:
+                if fila:
+                    filas.append(fila)
+                fila = {n: "" for n in nombres}
+            if fila is None:
+                continue
+            for w in ws:
+                c = col_de(w[0])
+                fila[c] = (fila[c] + " " + w[4]).strip()
+        if fila:
+            filas.append(fila)
+    return filas
+
 def leer_certificado_xerase(bytes_arch):
     doc = fitz.open(stream=bytes_arch, filetype="pdf")
-    filas = []
-    encabezados = None
+    debug = {"texto": 0, "tablas": 0}
     for pagina in doc:
-        for t in pagina.find_tables().tables:
-            for row in t.extract():
-                if not row or all(c is None for c in row):
-                    continue
-                celdas = [str(c).replace("\n", " ").strip() if c else "" for c in row]
-                up = [c.upper() for c in celdas]
-                if "SERIALNUM" in up and "SYSTEM_SN" in up:
-                    encabezados = up
-                    continue
-                if encabezados and re.match(r'^\d{1,2}/\d{1,2}/\d{2,4}', celdas[0]):
-                    filas.append(dict(zip(encabezados, celdas)))
-    return filas
+        debug["texto"] += len(pagina.get_text())
+    for estrategia in ["lines", "text"]:
+        encabezados = None
+        filas = []
+        for pagina in doc:
+            tablas = pagina.find_tables(strategy=estrategia).tables
+            debug["tablas"] += len(tablas)
+            for t in tablas:
+                for row in t.extract():
+                    if not row or all(c is None for c in row):
+                        continue
+                    celdas = [str(c).replace("\n", " ").strip() if c else "" for c in row]
+                    up = [c.upper() for c in celdas]
+                    if "SERIALNUM" in up and "SYSTEM_SN" in up:
+                        encabezados = up
+                        continue
+                    if encabezados and celdas and re.match(r'^\d{1,2}/\d{1,2}/\d{2,4}', celdas[0]):
+                        filas.append(dict(zip(encabezados, celdas)))
+        if filas:
+            return filas, f"estrategia={estrategia}"
+    filas = leer_certificado_por_posicion(doc)
+    if filas:
+        return filas, "posicional"
+    return [], f"texto={debug['texto']} tablas={debug['tablas']}"
+
+def limpiar_filas_certificado(filas):
+    limpias = []
+    for f in filas:
+        f = dict(f)
+        fecha = re.sub(r'\s+', ' ', str(f.get("DATE", ""))).strip()
+        m = re.match(r'^(\d{1,2}/\d{1,2}/(\d{2,4}))\s+(\d)$', fecha)
+        if m and len(m.group(2)) < 4:
+            partes = m.group(1).split("/")
+            partes[2] = partes[2] + m.group(3)
+            fecha = "/".join(partes)
+        m2 = re.match(r'^(\d{1,2}/\d{1,2}/\d{4})\s+(\d{1,2}:\d{2}(?::\d{2})?)\s*(.*)$', fecha)
+        if m2:
+            f["DATE"] = m2.group(1)
+            tiempo = m2.group(2)
+            extra = m2.group(3).strip()
+            if extra:
+                tiempo = f"{tiempo} {extra}"
+            f["TIME"] = tiempo
+        else:
+            f["DATE"] = fecha
+        ver = str(f.get("VER", ""))
+        m3 = re.match(r'^(v[\d.]+[a-z]?)\s*(\S.*)$', ver)
+        if m3:
+            f["VER"] = m3.group(1)
+            resto = m3.group(2).strip()
+            if resto:
+                f["ERASURE_METHOD"] = (resto + " " + str(f.get("ERASURE_METHOD", ""))).strip()
+        modelo = str(f.get("MODEL", ""))
+        m4 = re.search(r'(\d+\s?(?:GB|TB))\s*(\d+\s?(?:GB|TB))$', modelo, re.IGNORECASE)
+        if m4 and not str(f.get("CAPACITY", "")).strip():
+            f["MODEL"] = modelo[:m4.start(2)].strip()
+            f["CAPACITY"] = m4.group(2).upper().replace(" ", "")
+        cap = str(f.get("CAPACITY", ""))
+        dev = str(f.get("DEVICE_TYPE", ""))
+        tiene_size = lambda t: bool(re.search(r'\d\s?(GB|TB|MB)', t, re.IGNORECASE))
+        if cap and not tiene_size(cap):
+            if tiene_size(dev):
+                f["CAPACITY"], f["DEVICE_TYPE"] = dev, cap
+            else:
+                m5 = re.search(r'(\d+\s?(?:GB|TB))$', modelo, re.IGNORECASE)
+                f["DEVICE_TYPE"] = cap
+                if m5:
+                    f["CAPACITY"] = m5.group(1).upper().replace(" ", "")
+                    f["MODEL"] = modelo[:m5.start()].strip()
+                else:
+                    f["CAPACITY"] = ""
+        for k in f:
+            if isinstance(f[k], str):
+                f[k] = re.sub(r'\s+', ' ', f[k]).strip()
+        limpias.append(f)
+    return limpias
 
 def cargar_datos():
     if os.path.exists(ARCHIVO_DATOS):
@@ -233,6 +382,27 @@ def guardar_json(nombre, datos):
     with open(nombre, "w", encoding="utf-8") as f:
         json.dump(datos, f, ensure_ascii=False)
 
+def get_usuarios():
+    u = dict(USUARIOS_BASE)
+    u.update(cargar_json(ARCHIVO_USUARIOS))
+    return u
+
+def agregar_alerta(serial, usuario, po_intento, po_correcta, tipo):
+    alertas = cargar_json(ARCHIVO_ALERTAS)
+    if not isinstance(alertas, list):
+        alertas = []
+    alertas.append({
+        "id": f"{serial}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+        "fecha": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "usuario": usuario,
+        "serial": serial,
+        "po_intento": po_intento,
+        "po_correcta": po_correcta,
+        "tipo": tipo,
+        "leidos": [],
+    })
+    guardar_json(ARCHIVO_ALERTAS, alertas)
+
 def mostrar_logo(grande=False):
     if os.path.exists("logo.png"):
         with open("logo.png", "rb") as f:
@@ -249,22 +419,16 @@ if "usuario" not in st.session_state:
     st.session_state.usuario = ""
 if "po_actual" not in st.session_state:
     st.session_state.po_actual = ""
-if "df" not in st.session_state:
-    st.session_state.df = cargar_datos()
-if "df_cliente" not in st.session_state:
-    if os.path.exists(ARCHIVO_CLIENTE):
-        try:
-            st.session_state.df_cliente = pd.read_json(ARCHIVO_CLIENTE, orient="records", dtype=str)
-        except Exception:
-            st.session_state.df_cliente = None
-    else:
-        st.session_state.df_cliente = None
+
+USUARIOS = get_usuarios()
 
 if not st.session_state.logged_in:
     tk = st.query_params.get("tk")
-    if tk in USUARIOS:
-        st.session_state.logged_in = True
-        st.session_state.usuario = tk
+    if tk:
+        tk = str(tk).strip().lower()
+        if tk in USUARIOS:
+            st.session_state.logged_in = True
+            st.session_state.usuario = tk
 
 # ================= LOGIN =================
 if not st.session_state.logged_in:
@@ -283,17 +447,29 @@ if not st.session_state.logged_in:
         st.markdown("<br>", unsafe_allow_html=True)
         usuario = st.text_input("👤 Usuario")
         password = st.text_input("🔑 Contraseña", type="password")
+
         if st.button("🔓 Entrar al sistema", use_container_width=True):
-            if usuario in USUARIOS and USUARIOS[usuario] == password:
+            usuario_login = usuario.strip().lower()
+
+            if usuario_login in USUARIOS and USUARIOS[usuario_login] == password:
                 st.session_state.logged_in = True
-                st.session_state.usuario = usuario
-                st.query_params["tk"] = usuario
+                st.session_state.usuario = usuario_login
+                st.query_params["tk"] = usuario_login
                 st.rerun()
             else:
                 st.error("❌ Usuario o contraseña incorrectos")
     st.stop()
 
-# ================= MEMORIA MULTI-PO =================
+# ================= RECARGA MULTIUSUARIO (disco en vivo) =================
+st.session_state.df = cargar_datos()
+if os.path.exists(ARCHIVO_CLIENTE):
+    try:
+        st.session_state.df_cliente = pd.read_json(ARCHIVO_CLIENTE, orient="records", dtype=str)
+    except Exception:
+        st.session_state.df_cliente = None
+else:
+    st.session_state.df_cliente = None
+
 historial = cargar_json(ARCHIVO_HISTORIAL)
 pos_cliente = cargar_json(ARCHIVO_POS_CLIENTE)
 
@@ -310,6 +486,8 @@ for po, regs in pos_cliente.items():
         if s and s not in mapa_pos_cliente:
             mapa_pos_cliente[s] = po
 
+es_admin = st.session_state.usuario == "admin"
+
 # ================= BARRA LATERAL =================
 st.sidebar.title("⚙️ Menú")
 st.sidebar.markdown(f"👤 **Usuario:** {st.session_state.usuario.upper()}")
@@ -321,6 +499,13 @@ st.sidebar.divider()
 
 po_input = st.sidebar.text_input("🏷️ PO / Proyecto activo", value=st.session_state.po_actual, placeholder="Ej: PO_BANCO_2026")
 st.session_state.po_actual = po_input.strip().upper()
+
+pos_existentes = sorted(set(st.session_state.df["PO"])) if len(st.session_state.df) else []
+if es_admin:
+    po_vista = st.sidebar.selectbox("🔎 PO a visualizar", ["TODAS"] + pos_existentes, index=0)
+else:
+    po_vista = st.session_state.po_actual
+    st.sidebar.caption(f"🔎 Tu vista: PO {po_vista or 'personal'}")
 
 archivo_cliente = st.sidebar.file_uploader("📂 Subir base del cliente (PO)", type=["xlsx", "xls", "xlsm", "csv", "pdf"])
 if archivo_cliente:
@@ -430,7 +615,7 @@ if st.sidebar.button("🗑️ Reiniciar todos los datos"):
     st.session_state["xray"] = None
     st.session_state["archivo_bytes"] = None
     st.session_state["skip_po"] = 1
-    for f in [ARCHIVO_CLIENTE, ARCHIVO_HISTORIAL, ARCHIVO_POS_CLIENTE, ARCHIVO_LOGS]:
+    for f in [ARCHIVO_CLIENTE, ARCHIVO_HISTORIAL, ARCHIVO_POS_CLIENTE, ARCHIVO_LOGS, ARCHIVO_ALERTAS]:
         if os.path.exists(f):
             os.remove(f)
     st.sidebar.info("Sistema reiniciado por completo")
@@ -441,7 +626,31 @@ with ca:
     mostrar_logo()
 with cb:
     st.title("Sistema de Inventario TCG")
-    st.success(f"👋 ¡Bienvenido, {st.session_state.usuario.upper()}! | 🏷️ PO activa: {st.session_state.po_actual or 'SIN PO'}")
+    st.success(f"👋 ¡Bienvenido, {st.session_state.usuario.upper()}! | 🏷️ PO activa: {st.session_state.po_actual or 'SIN PO'} | 🔎 Vista: {po_vista}")
+
+# ================= ALERTAS DE EQUIPOS REVUELTOS =================
+alertas = cargar_json(ARCHIVO_ALERTAS)
+if not isinstance(alertas, list):
+    alertas = []
+pendientes = [a for a in alertas if st.session_state.usuario not in a.get("leidos", [])]
+if pendientes:
+    st.divider()
+    st.markdown("## 🚨 ALERTAS DE EQUIPOS REVUELTOS")
+    st.caption("Aviso para todo el equipo: eviten registrar seriales de POs que no les corresponden.")
+    for a in pendientes[-10:]:
+        if a["tipo"] == "DUPLICADO_OTRA_PO":
+            msg = (f"**{a['usuario']}** intentó registrar el serial **{a['serial']}** en la PO '{a['po_intento']}', "
+                   f"pero YA estaba registrado en la PO '**{a['po_correcta']}**' ({a['fecha']}).")
+        else:
+            msg = (f"**{a['usuario']}** registró el serial **{a['serial']}** en la PO '{a['po_intento']}', "
+                   f"pero ese serial aparece en la PO del cliente '**{a['po_correcta']}**' ({a['fecha']}).")
+        st.warning(f"⚠️ {msg}")
+        if st.button(f"✅ Entendido ({a['serial']})", key=f"ok_{a['id']}"):
+            for aa in alertas:
+                if aa["id"] == a["id"]:
+                    aa.setdefault("leidos", []).append(st.session_state.usuario)
+            guardar_json(ARCHIVO_ALERTAS, alertas)
+            st.rerun()
 
 if st.session_state.get("xray"):
     with st.expander("🩻 Radiografía del archivo (diagnóstico)", expanded=False):
@@ -458,9 +667,26 @@ if st.session_state.get("pdf_seriales"):
 df = st.session_state.df
 dfc = st.session_state.df_cliente
 
+# ================= VISTA SEGÚN ROL Y PO SELECCIONADA =================
+if es_admin:
+    if po_vista == "TODAS":
+        df_vista = df
+    else:
+        df_vista = df[df["PO"] == po_vista]
+else:
+    if st.session_state.po_actual:
+        df_vista = df[df["PO"] == st.session_state.po_actual]
+    else:
+        df_vista = df[df["Usuario"] == st.session_state.usuario]
+
 # ================= CÁLCULOS =================
-interno = len(df)
-cliente = len(dfc) if dfc is not None else 0
+interno = len(df_vista)
+if po_vista == "TODAS":
+    cliente = sum(len(v) for v in pos_cliente.values())
+elif po_vista:
+    cliente = len(pos_cliente.get(po_vista, []))
+else:
+    cliente = len(dfc) if dfc is not None else 0
 
 set_cliente = set()
 col_tipo_cliente = None
@@ -474,13 +700,13 @@ if dfc is not None:
     col_tipo_cliente = col_por_palabras(dfc, ["tipo", "arquitectura"])
 
 if set_cliente:
-    coinciden = int(df["Serial"].isin(set_cliente).sum())
+    coinciden = int(df_vista["Serial"].isin(set_cliente).sum())
     no_coinciden = interno - coinciden
 else:
     coinciden = "—"
     no_coinciden = "—"
 
-tipos_esc = df["Tipo"].map(norm_tipo)
+tipos_esc = df_vista["Tipo"].map(norm_tipo)
 pc_esc = int((tipos_esc == "CPU").sum())
 lap_esc = int((tipos_esc == "LAPTOP").sum())
 oth_esc = int(tipos_esc.isin(["OTHER", "MONITOR", "CELULAR", "TABLETA"]).sum())
@@ -515,6 +741,193 @@ c2.metric("Laptop Total PO Cliente", lap_cli if cliente else "—")
 c3.metric("Others Escaneada", oth_esc)
 c4.metric("Other Cliente", oth_cli if cliente else "—")
 
+# ================= ESTADÍSTICAS Y GRÁFICAS =================
+st.divider()
+st.markdown("## 📈 ESTADÍSTICAS Y GRÁFICAS")
+st.caption(f"Vista actual: **{po_vista}** | Todo lo de abajo se filtra según la PO seleccionada.")
+if not PLOTLY_OK:
+    st.warning("Falta plotly para las gráficas. Ejecuta: pip install plotly")
+elif len(df_vista) == 0:
+    st.info("Sin datos para graficar en esta vista.")
+else:
+    dfv = df_vista.copy()
+    dfv["Dia"] = dfv["Fecha"].str[:10]
+    dias = dfv["Dia"].nunique()
+    promedio = len(dfv) / dias if dias else 0
+    por_dia = dfv.groupby("Dia").size().reset_index(name="Equipos")
+    mejor = por_dia.loc[por_dia["Equipos"].idxmax()] if len(por_dia) else None
+    g1, g2, g3, g4 = st.columns(4)
+    g1.metric("Días activos", dias)
+    g2.metric("Promedio por día", f"{promedio:.1f}")
+    g3.metric("Mejor día", mejor["Dia"] if mejor is not None else "—")
+    g4.metric("Equipos ese día", int(mejor["Equipos"]) if mejor is not None else 0)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("**Capturas por día**")
+        fig = px.bar(por_dia, x="Dia", y="Equipos", color="Equipos", color_continuous_scale="Blues")
+        fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+    with c2:
+        st.markdown("**Avance acumulado**")
+        acum = dfv.groupby("Dia").size().cumsum().reset_index(name="Acumulado")
+        fig2 = px.line(acum, x="Dia", y="Acumulado", markers=True)
+        fig2.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig2, use_container_width=True)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown("**Por marca**")
+        tmp = dfv["Marca"].value_counts().reset_index()
+        tmp.columns = ["Marca", "Equipos"]
+        fig3 = px.pie(tmp, names="Marca", values="Equipos", hole=0.55)
+        fig3.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig3, use_container_width=True)
+    with c2:
+        st.markdown("**Por tipo de equipo**")
+        tmp2 = dfv["Tipo"].replace("", "SIN TIPO").value_counts().reset_index()
+        tmp2.columns = ["Tipo", "Equipos"]
+        fig4 = px.bar(tmp2, x="Tipo", y="Equipos", color="Tipo")
+        fig4.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
+        st.plotly_chart(fig4, use_container_width=True)
+    with c3:
+        st.markdown("**Status de captura**")
+        tmp3 = dfv["Status"].value_counts().reset_index()
+        tmp3.columns = ["Status", "Equipos"]
+        fig5 = px.pie(tmp3, names="Status", values="Equipos", hole=0.55)
+        fig5.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig5, use_container_width=True)
+
+    st.markdown("**Avance por PO (procesados vs declarados)**")
+    rows_po = []
+    for po in sorted(set(list(dfv["PO"]) + list(pos_cliente.keys()))):
+        if po in ("", "SIN_PO"):
+            continue
+        rows_po.append({
+            "PO": po,
+            "Procesados": len(dfv[dfv["PO"] == po]),
+            "Declarados": len(pos_cliente.get(po, [])),
+        })
+    if rows_po:
+        fig6 = px.bar(pd.DataFrame(rows_po), x="PO", y=["Procesados", "Declarados"], barmode="group",
+                      color_discrete_sequence=["#2ca02c", "#7f7f7f"])
+        fig6.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10))
+        st.plotly_chart(fig6, use_container_width=True)
+
+    if es_admin:
+        st.markdown("**Rendimiento por usuario**")
+        tmp4 = dfv["Usuario"].value_counts().reset_index()
+        tmp4.columns = ["Usuario", "Equipos"]
+        fig7 = px.bar(tmp4, x="Usuario", y="Equipos", color="Usuario")
+        fig7.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
+        st.plotly_chart(fig7, use_container_width=True)
+
+# ================= SUPERVISIÓN + USUARIOS (SOLO ADMIN) =================
+if es_admin:
+    st.divider()
+    st.markdown("## 🕵️ SUPERVISIÓN DE EQUIPO (solo admin)")
+    if len(df) == 0:
+        st.info("Aún no hay capturas registradas.")
+    else:
+        rows = []
+        for u in sorted(df["Usuario"].unique()):
+            du = df[df["Usuario"] == u]
+            pos_u = ", ".join(sorted(set(du["PO"])))
+            pcts = []
+            for po in sorted(set(du["PO"])):
+                decl = len(pos_cliente.get(po, [])) if po in pos_cliente else 0
+                n_po = len(du[du["PO"] == po])
+                if decl:
+                    pcts.append(f"{po}: {n_po / decl:.0%}")
+                else:
+                    pcts.append(f"{po}: {n_po} eq.")
+            rows.append({
+                "Usuario": u,
+                "PO(s) asignada(s)": pos_u,
+                "Equipos registrados": len(du),
+                "Avance por PO": ", ".join(pcts),
+                "Último registro": du["Fecha"].max(),
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        st.markdown("**Avance global por PO:**")
+        rows2 = []
+        for po in sorted(set(df["PO"])):
+            decl = len(pos_cliente.get(po, [])) if po in pos_cliente else 0
+            tot = len(df[df["PO"] == po])
+            usuarios_po = ", ".join(sorted(set(df[df["PO"] == po]["Usuario"])))
+            rows2.append({
+                "PO": po,
+                "Declarados cliente": decl if decl else "—",
+                "Procesados": tot,
+                "Avance": f"{tot / decl:.0%}" if decl else "—",
+                "Usuarios trabajando": usuarios_po,
+            })
+        st.dataframe(pd.DataFrame(rows2), use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.markdown("## 👥 ADMINISTRACIÓN DE USUARIOS (solo admin)")
+    usuarios_locales = cargar_json(ARCHIVO_USUARIOS)
+    usuarios_totales = get_usuarios()
+    cu1, cu2 = st.columns(2)
+    with cu1:
+        st.markdown("**Usuarios base (del código):**")
+        for u in USUARIOS_BASE:
+            if u == "admin":
+                st.write(f"👑 {u} — protegido")
+            else:
+                st.write(f"🔒 {u} — usuario base")
+        st.markdown("**Usuarios creados por admin:**")
+        if usuarios_locales:
+            for u in list(usuarios_locales.keys()):
+                cc1, cc2 = st.columns([3, 1])
+                cc1.write(f"👤 {u}")
+                if cc2.button("🗑️", key=f"eliminar_usuario_{u}"):
+                    usuarios_locales.pop(u, None)
+                    guardar_json(ARCHIVO_USUARIOS, usuarios_locales)
+                    st.success(f"Usuario {u} eliminado ✅")
+                    st.rerun()
+        else:
+            st.info("Aún no hay usuarios creados.")
+    with cu2:
+        with st.form("form_crear_usuario"):
+            nuevo_u = st.text_input("Nuevo usuario")
+            nuevo_p = st.text_input("Contraseña", type="password")
+            crear = st.form_submit_button("➕ Crear usuario")
+        if crear:
+            nuevo_u = nuevo_u.strip().lower()
+            nuevo_p = nuevo_p.strip()
+            if not nuevo_u or not nuevo_p:
+                st.error("Escribe usuario y contraseña.")
+            elif nuevo_u in usuarios_totales:
+                st.error(f"El usuario '{nuevo_u}' ya existe.")
+            elif not re.match(r'^[a-z0-9_.-]{3,20}$', nuevo_u):
+                st.error("Usuario: 3-20 caracteres (letras, números, punto, guion).")
+            else:
+                usuarios_locales[nuevo_u] = nuevo_p
+                guardar_json(ARCHIVO_USUARIOS, usuarios_locales)
+                st.success(f"Usuario '{nuevo_u}' creado ✅")
+                st.rerun()
+
+    st.markdown("### 🔑 Cambiar contraseña (solo admin)")
+    with st.form("form_cambiar_pass"):
+        lista_us = sorted(get_usuarios().keys())
+        u_sel = st.selectbox("Usuario a modificar", lista_us)
+        nueva_pass = st.text_input("Nueva contraseña", type="password")
+        cambiar = st.form_submit_button("🔑 Cambiar contraseña")
+    if cambiar:
+        if not nueva_pass.strip():
+            st.error("Escribe una contraseña nueva.")
+        elif len(nueva_pass.strip()) < 4:
+            st.error("La contraseña debe tener al menos 4 caracteres.")
+        else:
+            datos = cargar_json(ARCHIVO_USUARIOS)
+            if not isinstance(datos, dict):
+                datos = {}
+            datos[u_sel] = nueva_pass.strip()
+            guardar_json(ARCHIVO_USUARIOS, datos)
+            st.success(f"Contraseña de '{u_sel}' actualizada ✅")
+            st.rerun()
+
 st.divider()
 
 # ================= CAPTURA =================
@@ -536,6 +949,7 @@ with tab1:
             po_previa = fila["PO"] or "SIN PO"
             if po_previa != (st.session_state.po_actual or "SIN PO"):
                 st.error(f"🚨 TRAZABILIDAD: Este serial YA fue registrado en la PO '{po_previa}' por {fila['Usuario'] or 'alguien'} el {fila['Fecha']}. Revisa si está en la PO equivocada.")
+                agregar_alerta(serial, st.session_state.usuario, st.session_state.po_actual or "SIN_PO", po_previa, "DUPLICADO_OTRA_PO")
             else:
                 st.error(f"⚠️ SERIAL DUPLICADO en esta misma PO ({po_previa}).")
         else:
@@ -564,6 +978,7 @@ with tab1:
                 st.success(f"✅ {serial} registrado en PO '{po_nueva}' — ✔️ COINCIDE con la PO del cliente")
             elif status_nuevo.startswith("Pertenece"):
                 st.warning(f"⚠️ {serial} registrado en '{po_nueva}', pero OJO: {status_nuevo} del cliente.")
+                agregar_alerta(serial, st.session_state.usuario, po_nueva, mapa_pos_cliente[serial], "REGISTRADO_PO_AJENA")
             elif status_nuevo == "No está en PO":
                 st.warning(f"⚠️ {serial} registrado en '{po_nueva}', pero NO está en la PO del cliente.")
             else:
@@ -587,6 +1002,9 @@ with tab2:
                 mal += 1
                 continue
             if serial in existentes:
+                fila = df[df["Serial"] == serial].iloc[0]
+                if (fila["PO"] or "SIN_PO") != po_nueva:
+                    agregar_alerta(serial, st.session_state.usuario, po_nueva, fila["PO"] or "SIN_PO", "DUPLICADO_OTRA_PO")
                 dup += 1
                 continue
             existentes.add(serial)
@@ -653,7 +1071,7 @@ if bb.button("🔍 Consultar modelos (Dell + Lenovo)"):
         st.success("Consulta Dell/Lenovo terminada ✅")
         st.rerun()
 
-df_final = st.session_state.df
+df_final = df_vista
 buffer = io.BytesIO()
 with pd.ExcelWriter(buffer, engine="openpyxl") as w:
     df_final.to_excel(w, index=False, sheet_name="TABLA_CAPTURA")
@@ -662,30 +1080,54 @@ bc.download_button("⬇️ Descargar Excel", buffer.getvalue(),
 
 # ================= TABLA CAPTURA =================
 st.markdown("## 📋 TABLA CAPTURA")
-st.caption("Edita Modelo, Tipo, Costumer o PO directamente aquí si necesitas corregir algo.")
-df_editado = st.data_editor(st.session_state.df, use_container_width=True, hide_index=True, num_rows="dynamic")
-if st.button("💾 Guardar cambios de la tabla"):
-    st.session_state.df = df_editado.fillna("")
-    guardar_datos(st.session_state.df)
-    st.success("Cambios guardados ✅")
-    st.rerun()
+if es_admin:
+    st.caption("Edita Modelo, Tipo, Costumer o PO directamente aquí si necesitas corregir algo.")
+    df_editado = st.data_editor(st.session_state.df, use_container_width=True, hide_index=True, num_rows="dynamic")
+    if st.button("💾 Guardar cambios de la tabla"):
+        st.session_state.df = df_editado.fillna("")
+        guardar_datos(st.session_state.df)
+        st.success("Cambios guardados ✅")
+        st.rerun()
+else:
+    st.caption(f"Viendo únicamente tu PO: **{st.session_state.po_actual or 'tu captura'}** (solo lectura; captura en las pestañas de arriba).")
+    st.dataframe(df_vista, use_container_width=True, hide_index=True)
 
-# ================= FASE 2: LOGS XERASE (TXT) =================
+# ================= FASE 2: LOGS XERASE =================
 st.divider()
-st.markdown("## 💾 FASE 2 — LOGS DE BORRADO XERASE (TXT)")
-st.caption("Sube los .txt de la USB (todos juntos). Extrae: fabricante, modelo y serial de disco, capacidad, grado e ISPF.")
+st.markdown("## 💾 FASE 2 — LOGS DE BORRADO XERASE")
+st.caption("Sube la CARPETA COMPLETA de borrados: selecciona todos los archivos (Ctrl+A) o sube el ZIP. El sistema detecta solo los logs XErase reales y descarta .xml, .pdf y demás.")
 
 logs_borrado = cargar_json(ARCHIVO_LOGS)
 
-log_files = st.file_uploader("Subir logs Xerase (TXT/LOG)", type=["txt", "log"], accept_multiple_files=True, key="logs")
+log_files = st.file_uploader("Subir carpeta de borrado (ZIP o archivos sueltos)", type=None, accept_multiple_files=True, key="logs")
 if log_files:
+    candidatos = []
     for lf in log_files:
-        if lf.name in st.session_state.get("logs_procesados", set()):
+        data = lf.getvalue()
+        if lf.name.lower().endswith(".zip"):
+            try:
+                z = zipfile.ZipFile(io.BytesIO(data))
+                for info in z.infolist():
+                    if info.is_dir():
+                        continue
+                    candidatos.append((info.filename, z.read(info)))
+            except Exception:
+                continue
+        else:
+            candidatos.append((lf.name, data))
+    procesados = 0
+    ignorados = 0
+    rows_log = []
+    for nombre, data in candidatos:
+        if nombre in st.session_state.get("logs_procesados", set()):
             continue
-        st.session_state.setdefault("logs_procesados", set()).add(lf.name)
-        raw = lf.getvalue().decode("utf-8", errors="ignore")
+        st.session_state.setdefault("logs_procesados", set()).add(nombre)
+        raw = data.decode("utf-8", errors="ignore")
+        if not re.search(r'XERAS|Erasure Results|Serial Number\s*:', raw, re.IGNORECASE):
+            ignorados += 1
+            continue
         d = leer_log_xerase(raw)
-        clave = d["serial_disco"] or lf.name
+        clave = d["serial_disco"] or nombre
         logs_borrado[clave] = d
         guardar_json(ARCHIVO_LOGS, logs_borrado)
         msg = ""
@@ -701,10 +1143,23 @@ if log_files:
                     st.session_state.df.at[i, "Capacidad"] = d["capacidad"]
                 st.session_state.df.at[i, "Log Borrado"] = (d["grade"] or "Procesado") + " | " + datetime.now().strftime("%Y-%m-%d")
                 guardar_datos(st.session_state.df)
-                msg = f" → Enlazado con la tabla vía ISPF ({d['ispf']})."
-        with st.expander(f"📄 {lf.name} → Disco: {d['serial_disco'] or '—'} | {d['modelo_disco'] or '—'} | {d['capacidad'] or '—'} | {d['grade'] or '—'}"):
-            st.code(raw[:800])
-        st.success(f"✅ Log {lf.name} guardado en memoria.{msg}")
+                msg = f"Enlazado vía ISPF ({d['ispf']})"
+        rows_log.append({
+            "Archivo": nombre,
+            "Serial disco": d["serial_disco"],
+            "Modelo disco": f"{d['fabricante_disco']} {d['modelo_disco']}".strip(),
+            "Capacidad": d["capacidad"],
+            "Grado": d["grade"],
+            "ISPF": d["ispf"],
+            "Resultado": d["resultado"],
+            "Nota": msg,
+        })
+        procesados += 1
+    if procesados or ignorados:
+        st.success(f"✅ {procesados} logs XErase procesados | 🗑️ {ignorados} archivos ignorados (xml, pdf, etc.)")
+    if rows_log:
+        with st.expander("Ver resumen de logs procesados", expanded=True):
+            st.dataframe(pd.DataFrame(rows_log), use_container_width=True, hide_index=True)
 
 # ================= FASE 3: CERTIFICADO XERASE (PDF) =================
 st.divider()
@@ -718,10 +1173,13 @@ if cert_files:
         if cf.name in st.session_state.get("certs_procesados", set()):
             continue
         st.session_state.setdefault("certs_procesados", set()).add(cf.name)
-        filas = leer_certificado_xerase(cf.getvalue())
+        filas, debug = leer_certificado_xerase(cf.getvalue())
         if not filas:
-            st.error(f"❌ {cf.name}: no se detectó la tabla del certificado.")
+            st.error(f"❌ {cf.name}: no se detectó la tabla del certificado. (debug: {debug})")
             continue
+        with st.expander("🔎 Ver filas leídas del certificado"):
+            st.dataframe(pd.DataFrame(filas), use_container_width=True)
+        filas = limpiar_filas_certificado(filas)
         ok_tabla = 0
         sin_tabla = []
         sin_log = []
@@ -775,6 +1233,26 @@ if cert_files:
     elif discos_cert:
         st.success("✅ Todos los discos de tus logs aparecen en el certificado. Cotejo completo.")
 
+# ================= CONVERSOR DE CERTIFICADOS (PDF → EXCEL) =================
+st.divider()
+st.markdown("## 🔄 CONVERSOR DE CERTIFICADOS (PDF → EXCEL)")
+st.caption("Sube uno o VARIOS certificados XErase (mismo formato). Si algo vino pegado (fecha+hora), se separa solo. Y puedes editar cualquier celda aquí mismo antes de descargar.")
+
+conv_files = st.file_uploader("Subir certificados para convertir", type=["pdf"], accept_multiple_files=True, key="conv")
+if conv_files:
+    for cf in conv_files:
+        filas, debug = leer_certificado_xerase(cf.getvalue())
+        if not filas:
+            st.error(f"❌ {cf.name}: no se detectó la tabla. (debug: {debug})")
+            continue
+        filas_limpias = limpiar_filas_certificado(filas)
+        st.markdown(f"### 📄 {cf.name} — {len(filas_limpias)} discos")
+        df_edit = st.data_editor(pd.DataFrame(filas_limpias), key=f"ed_{cf.name}", use_container_width=True, hide_index=True, num_rows="dynamic")
+        buf = io.BytesIO()
+        pd.DataFrame(df_edit).to_excel(buf, index=False, engine="openpyxl")
+        st.download_button(f"⬇️ Descargar Excel de {cf.name}", data=buf.getvalue(),
+                           file_name=f"{os.path.splitext(cf.name)[0]}_convertido.xlsx", key=f"dl_{cf.name}")
+
 # ================= REPORTE FINAL IMPRIMIBLE =================
 import streamlit.components.v1 as components
 
@@ -790,7 +1268,7 @@ st.markdown("""
 
 st.divider()
 st.markdown("## 📊 REPORTE FINAL POR PO")
-st.caption(f"PO activa: {st.session_state.po_actual or 'SIN PO'} | Estado actual del proyecto.")
+st.caption(f"PO activa: {st.session_state.po_actual or 'SIN PO'} | Vista: {po_vista} | Estado actual del proyecto.")
 
 r1, r2, r3, r4 = st.columns(4)
 r1.metric("Equipos Totales", interno)

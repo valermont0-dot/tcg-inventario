@@ -5,3 +5,4 @@ requests
 pymupdf
 pytesseract
 Pillow
+plotly
