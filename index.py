@@ -415,6 +415,8 @@ def registrar_po(nombre, usuario, con_base=False, declarados=0):
             "con_base": con_base,
             "declarados": declarados,
             "estado": "ABIERTA",
+            "asignada_a": "",
+            "tomada_por": "",
         }
         guardar_json(ARCHIVO_POS_REG, reg)
     return reg
@@ -533,12 +535,16 @@ po_sel = st.sidebar.selectbox("🏷️ PO / Proyecto activo", opciones, index=id
 
 if po_sel == "➕ CREAR PO NUEVA...":
     nombre_nuevo = st.sidebar.text_input("Nombre de la PO nueva", placeholder="Ej: PO_SORIANA_2026")
+    asignar_a = st.sidebar.selectbox("🎯 Asignar a (opcional)", ["— sin asignar —"] + sorted(get_usuarios().keys()))
     if st.sidebar.button("📝 Iniciar PO"):
         nn = nombre_nuevo.strip().upper().replace(" ", "_")
         if nn:
-            registrar_po(nn, st.session_state.usuario)
-            st.session_state.po_actual = nn
-            st.sidebar.success(f"PO '{nn}' iniciada ✅")
+            reg_n = registrar_po(nn, st.session_state.usuario)
+            if asignar_a != "— sin asignar —":
+                reg_n[nn]["asignada_a"] = asignar_a
+                guardar_json(ARCHIVO_POS_REG, reg_n)
+            st.session_state.po_actual = ""
+            st.sidebar.success(f"PO '{nn}' creada ✅ — aún SIN TOMAR")
             st.rerun()
         else:
             st.sidebar.error("Escribe un nombre para la PO.")
@@ -547,25 +553,33 @@ elif po_sel in ("(selecciona una PO)", "(sin POs activas)"):
     st.session_state.po_actual = ""
     st.sidebar.info("Selecciona una PO para trabajar. La captura está deshabilitada hasta que tomes una.")
 else:
-    st.session_state.po_actual = po_sel
-    reg_t = cargar_json(ARCHIVO_POS_REG)
-    if not isinstance(reg_t, dict):
-        reg_t = {}
-    if po_sel in reg_t and not reg_t[po_sel].get("tomada_por"):
-        reg_t[po_sel]["tomada_por"] = st.session_state.usuario
-        reg_t[po_sel]["tomada_fecha"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-        guardar_json(ARCHIVO_POS_REG, reg_t)
-        pos_reg = reg_t
-        st.sidebar.success(f"🎯 Tomaste la PO {po_sel}")
-    if po_sel in pos_sin_reg and es_admin and st.sidebar.button("📝 Registrar como iniciada", key="btn_reg_det"):
-        registrar_po(po_sel, st.session_state.usuario)
-        st.rerun()
-    info_po = pos_reg.get(po_sel, {})
-    if info_po:
-        st.sidebar.caption(f"📅 Iniciada: {info_po.get('inicio', '—')} por {info_po.get('usuario', '—')}")
-        st.sidebar.caption(f"📦 Base cliente: {'SÍ (' + str(info_po.get('declarados', 0)) + ' declarados)' if info_po.get('con_base') else 'NO (desde cero)'}")
-        if info_po.get("tomada_por"):
-            st.sidebar.caption(f"🎯 Tomada por: {info_po['tomada_por']} ({info_po.get('tomada_fecha', '')})")
+    info_sel = pos_reg.get(po_sel, {})
+    asignada = info_sel.get("asignada_a", "")
+    if asignada and st.session_state.usuario != asignada and not es_admin:
+        st.session_state.po_actual = ""
+        st.sidebar.error(f"🔒 La PO {po_sel} está asignada a '{asignada}'. Solo él/ella o el admin pueden tomarla.")
+    else:
+        st.session_state.po_actual = po_sel
+        reg_t = cargar_json(ARCHIVO_POS_REG)
+        if not isinstance(reg_t, dict):
+            reg_t = {}
+        if po_sel in reg_t and not reg_t[po_sel].get("tomada_por"):
+            reg_t[po_sel]["tomada_por"] = st.session_state.usuario
+            reg_t[po_sel]["tomada_fecha"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+            guardar_json(ARCHIVO_POS_REG, reg_t)
+            pos_reg = reg_t
+            st.sidebar.success(f"🎯 Tomaste la PO {po_sel}")
+        if po_sel in pos_sin_reg and es_admin and st.sidebar.button("📝 Registrar como iniciada", key="btn_reg_det"):
+            registrar_po(po_sel, st.session_state.usuario)
+            st.rerun()
+        info_po = pos_reg.get(po_sel, {})
+        if info_po:
+            st.sidebar.caption(f"📅 Iniciada: {info_po.get('inicio', '—')} por {info_po.get('usuario', '—')}")
+            st.sidebar.caption(f"📦 Base cliente: {'SÍ (' + str(info_po.get('declarados', 0)) + ' declarados)' if info_po.get('con_base') else 'NO (desde cero)'}")
+            if info_po.get("asignada_a"):
+                st.sidebar.caption(f"🔒 Asignada a: {info_po['asignada_a']}")
+            if info_po.get("tomada_por"):
+                st.sidebar.caption(f"🎯 Tomada por: {info_po['tomada_por']} ({info_po.get('tomada_fecha', '')})")
 
 pos_existentes = sorted(set(st.session_state.df["PO"])) if len(st.session_state.df) else []
 if es_admin:
@@ -815,7 +829,7 @@ c4.metric("Other Cliente", oth_cli if cliente else "—")
 # ================= REGISTRO DE POs =================
 st.divider()
 st.markdown("## 📋 REGISTRO DE POs (estado de proyectos)")
-st.caption("Libro de proyectos: qué POs están iniciadas, quién las inició, quién las tomó, si tienen base del cliente o son desde cero, y su avance.")
+st.caption("Libro de proyectos: qué POs están iniciadas, quién las inició, a quién están asignadas, quién las tomó, si tienen base y su avance.")
 rows_reg = []
 for po in sorted(set(list(pos_reg.keys()) + list(set(df["PO"])))):
     if not po or po == "SIN_PO":
@@ -827,7 +841,8 @@ for po in sorted(set(list(pos_reg.keys()) + list(set(df["PO"])))):
         "PO": po,
         "Iniciada": info.get("inicio", "sin registrar"),
         "Por": info.get("usuario", "—"),
-        "Tomada por": info.get("tomada_por", "— nadie aún —"),
+        "Asignada a": info.get("asignada_a") or "— libre —",
+        "Tomada por": info.get("tomada_por") or "— nadie aún —",
         "Base cliente": f"CON BASE ({decl})" if (info.get("con_base") or po in pos_cliente) else "SIN BASE (desde cero)",
         "Capturados": capt,
         "Avance": f"{capt / decl:.0%}" if decl else "—",
@@ -1022,6 +1037,23 @@ if es_admin:
             guardar_json(ARCHIVO_USUARIOS, datos)
             st.success(f"Contraseña de '{u_sel}' actualizada ✅")
             st.rerun()
+
+    st.markdown("### 🎯 Asignar PO a usuario (cuando quieras)")
+    with st.form("form_asignar_po"):
+        pos_asig = sorted([p for p in pos_reg.keys() if pos_reg[p].get("estado", "ABIERTA") == "ABIERTA"])
+        if pos_asig:
+            po_a = st.selectbox("PO", pos_asig)
+            u_a = st.selectbox("Asignar a", ["— sin asignar —"] + sorted(get_usuarios().keys()))
+            asignar = st.form_submit_button("🎯 Asignar")
+            if asignar:
+                reg_a = cargar_json(ARCHIVO_POS_REG)
+                if isinstance(reg_a, dict) and po_a in reg_a:
+                    reg_a[po_a]["asignada_a"] = "" if u_a == "— sin asignar —" else u_a
+                    guardar_json(ARCHIVO_POS_REG, reg_a)
+                    st.success(f"PO {po_a} asignada a {u_a} ✅")
+                    st.rerun()
+        else:
+            st.info("No hay POs abiertas para asignar.")
 
 st.divider()
 
