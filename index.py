@@ -1252,7 +1252,62 @@ if conv_files:
         pd.DataFrame(df_edit).to_excel(buf, index=False, engine="openpyxl")
         st.download_button(f"⬇️ Descargar Excel de {cf.name}", data=buf.getvalue(),
                            file_name=f"{os.path.splitext(cf.name)[0]}_convertido.xlsx", key=f"dl_{cf.name}")
+# ================= CIERRE Y ARCHIVO DE POs (SOLO ADMIN) =================
+ARCHIVO_CERRADAS = "po_cerradas.json"
 
+if es_admin:
+    st.divider()
+    st.markdown("## 🗄️ CIERRE DE PO (archivar y revisar después)")
+    cerradas = cargar_json(ARCHIVO_CERRADAS)
+    if not isinstance(cerradas, dict):
+        cerradas = {}
+    pos_abiertas = sorted(set(df["PO"])) if len(df) else []
+    pos_abiertas = [p for p in pos_abiertas if p and p != "SIN_PO"]
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("### 🔒 Cerrar una PO")
+        if pos_abiertas:
+            po_cerrar = st.selectbox("PO a cerrar", pos_abiertas, key="po_cerrar")
+            n_filas = len(df[df["PO"] == po_cerrar])
+            st.caption(f"Se archivarán {n_filas} equipos de esta PO y desaparecerán de la tabla activa.")
+            if st.button("🔒 Cerrar PO y archivar", key="btn_cerrar"):
+                filas_po = df[df["PO"] == po_cerrar]
+                decl = len(pos_cliente.get(po_cerrar, []))
+                cerradas[po_cerrar] = {
+                    "fecha_cierre": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "usuario": st.session_state.usuario,
+                    "metricas": {
+                        "equipos": len(filas_po),
+                        "declarados": decl,
+                        "avance": f"{len(filas_po) / decl:.0%}" if decl else "—",
+                        "coinciden": int(filas_po["Serial"].isin(set_cliente).sum()) if set_cliente else "—",
+                    },
+                    "filas": filas_po.to_dict(orient="records"),
+                }
+                guardar_json(ARCHIVO_CERRADAS, cerradas)
+                st.session_state.df = df[df["PO"] != po_cerrar].reset_index(drop=True)
+                guardar_datos(st.session_state.df)
+                st.success(f"PO '{po_cerrar}' cerrada y archivada ✅")
+                st.rerun()
+        else:
+            st.info("No hay POs abiertas con equipos registrados.")
+    with c2:
+        st.markdown("### 👁️ Revisar POs cerradas")
+        if cerradas:
+            po_ver = st.selectbox("PO cerrada a revisar", sorted(cerradas.keys()), key="po_ver")
+            info = cerradas[po_ver]
+            st.caption(f"Cerrada el {info['fecha_cierre']} por {info['usuario']}")
+            m = info["metricas"]
+            st.write(f"**Equipos:** {m['equipos']} | **Declarados:** {m['declarados']} | **Avance:** {m['avance']} | **Coinciden:** {m['coinciden']}")
+            dfc_err = pd.DataFrame(info["filas"])
+            st.dataframe(dfc_err, use_container_width=True, hide_index=True)
+            bufc = io.BytesIO()
+            with pd.ExcelWriter(bufc, engine="openpyxl") as w:
+                dfc_err.to_excel(w, index=False, sheet_name=po_ver[:28])
+            st.download_button(f"⬇️ Excel de la PO cerrada {po_ver}", data=bufc.getvalue(),
+                               file_name=f"PO_CERRADA_{po_ver}.xlsx", key=f"dl_cerrada_{po_ver}")
+        else:
+            st.info("Aún no hay POs cerradas.")
 # ================= REPORTE FINAL IMPRIMIBLE =================
 import streamlit.components.v1 as components
 
