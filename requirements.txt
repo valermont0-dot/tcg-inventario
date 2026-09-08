@@ -2,7 +2,7 @@ streamlit
 pandas
 openpyxl
 requests
-pymupdf
+PyMuPDF
 pytesseract
 Pillow
 plotly
