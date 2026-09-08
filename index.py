@@ -62,7 +62,7 @@ def limpiar_serial(texto):
     return s
 
 def longitud_ok(s):
-    return 5 <= len(s) <= 20
+    return len(s) >= 1
 
 def detectar_marca(serial):
     if serial.startswith('PF') or 'LNV' in serial or re.match(r'^[A-Z]{2}[0-9]', serial): return 'LENOVO'
@@ -154,6 +154,18 @@ def parece_serial(tok):
     if not any(c.isalpha() for c in tok):
         return False
     return True
+
+def norm_core(t):
+    return re.sub(r'[^A-Z0-9]', '', str(t).upper())
+
+def core_match(s, conjunto):
+    s = norm_core(s)
+    if not s:
+        return False
+    for c in conjunto:
+        if s == c or (len(s) >= 7 and (s in c or c in s)):
+            return True
+    return False
 
 def leer_pdf_seriales(bytes_arch):
     doc = fitz.open(stream=bytes_arch, filetype="pdf")
@@ -313,7 +325,7 @@ def limpiar_filas_certificado(filas):
             partes = m.group(1).split("/")
             partes[2] = partes[2] + m.group(3)
             fecha = "/".join(partes)
-        m2 = re.match(r'^(\d{1,2}/\d{1,2}/\d{4})\s+(\d{1,2}:\d{2}(?::\d{2})?)\s*(.*)$', fecha)
+        m2 = re.match(r'^(\d{1,2}/\d{1,2}/\d{4})\s*(\d{1,2}:\d{2}(?::\d{2})?)\s*(.*)$', fecha)
         if m2:
             f["DATE"] = m2.group(1)
             tiempo = m2.group(2)
@@ -1072,7 +1084,7 @@ with tab1:
         if not st.session_state.po_actual:
             st.error("🏷️ Primero selecciona/toma una PO en la barra lateral.")
         elif not longitud_ok(serial):
-            st.error(f"⚠️ LONGITUD INCORRECTA: {len(serial)} caracteres. Debe ser entre 5 y 20.")
+            st.error("⚠️ SERIAL VACÍO: no se registró nada válido.")
         elif serial in existentes:
             fila = df[df["Serial"] == serial].iloc[0]
             po_previa = fila["PO"] or "SIN PO"
@@ -1132,8 +1144,6 @@ with tab2:
         for linea in texto.splitlines():
             serial = limpiar_serial(linea)
             if not serial:
-                continue
-            if not longitud_ok(serial):
                 mal += 1
                 continue
             if serial in existentes:
@@ -1155,7 +1165,7 @@ with tab2:
             st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(nuevas)], ignore_index=True)
             guardar_datos(st.session_state.df)
             guardar_json(ARCHIVO_HISTORIAL, historial)
-        st.success(f"✅ Registrados en PO '{po_nueva}': {ok} | ❌ Duplicados: {dup} | ⚠️ Longitud incorrecta: {mal}")
+        st.success(f"✅ Registrados en PO '{po_nueva}': {ok} | ❌ Duplicados: {dup} | ⚠️ Vacíos: {mal}")
         st.rerun()
 
 # ================= BOTONES DE ACCIÓN =================
@@ -1299,11 +1309,14 @@ if log_files:
 # ================= FASE 3: CERTIFICADO XERASE (PDF) =================
 st.divider()
 st.markdown("## 📜 FASE 3 — CERTIFICADO XERASE (Comparación final)")
-st.caption("Sube el PDF. Compara cada disco y equipo contra tus logs (Fase 2) y contra tu TABLA CAPTURA.")
+st.caption("Sube el PDF (aunque tenga 600 equipos). Compara contra tus logs (Fase 2), tu TABLA CAPTURA y tu Excel manual de discos.")
+
+excel_manual = st.file_uploader("📗 Excel manual de discos (opcional, comparativa de 3 vías)", type=["xlsx", "xls"], key="excel_manual")
 
 cert_files = st.file_uploader("Subir certificado Xerase (PDF)", type=["pdf"], accept_multiple_files=True, key="certs")
 if cert_files:
     discos_cert = set()
+    cert_map = {}
     for cf in cert_files:
         if cf.name in st.session_state.get("certs_procesados", set()):
             continue
@@ -1326,6 +1339,7 @@ if cert_files:
             status = fila.get("STATUS", "")
             cap_cert = fila.get("CAPACITY", "")
             discos_cert.add(serial_disco)
+            cert_map[serial_disco] = system_sn
             log = logs_borrado.get(serial_disco, {})
             if not log:
                 sin_log.append(serial_disco)
@@ -1367,6 +1381,53 @@ if cert_files:
         st.warning(f"⚠️ Discos con log que NO aparecen en el certificado: {', '.join(sorted(sin_cert))}")
     elif discos_cert:
         st.success("✅ Todos los discos de tus logs aparecen en el certificado. Cotejo completo.")
+
+    # ---------- COMPARATIVA DE 3 VÍAS: LOG vs CERTIFICADO vs EXCEL ----------
+    if excel_manual is not None and cert_map:
+        try:
+            dfm = pd.read_excel(io.BytesIO(excel_manual.getvalue()), dtype=str)
+            col_m = col_por_palabras(dfm, ["serial", "disco", "drive", "sn"]) or detectar_col_serial(dfm)
+            if col_m is None and len(dfm.columns) > 0:
+                col_m = dfm.columns[0]
+            excel_set = {norm_core(v) for v in dfm[col_m].dropna()}
+            log_set = {norm_core(v) for v in logs_borrado.keys()}
+            rows_cmp = []
+            for sd, ssn in cert_map.items():
+                en_log = core_match(sd, log_set)
+                en_excel = core_match(sd, excel_set)
+                if en_log and en_excel:
+                    ver = "✅ COINCIDE EN LOG, CERTIFICADO Y EXCEL"
+                else:
+                    faltas = []
+                    if not en_log:
+                        faltas.append("LOG")
+                    if not en_excel:
+                        faltas.append("EXCEL")
+                    ver = "⚠️ FALTA EN: " + ", ".join(faltas)
+                rows_cmp.append({
+                    "Serial disco (certificado)": sd,
+                    "Equipo (SYSTEM_SN)": ssn,
+                    "En log": "✅" if en_log else "❌",
+                    "En Excel manual": "✅" if en_excel else "❌",
+                    "Veredicto": ver,
+                })
+            for extra in (log_set | excel_set) - {norm_core(sd) for sd in cert_map}:
+                rows_cmp.append({
+                    "Serial disco (certificado)": extra,
+                    "Equipo (SYSTEM_SN)": "—",
+                    "En log": "✅" if core_match(extra, log_set) else "❌",
+                    "En Excel manual": "✅" if core_match(extra, excel_set) else "❌",
+                    "Veredicto": "⚠️ NO APARECE EN EL CERTIFICADO",
+                })
+            df_cmp = pd.DataFrame(rows_cmp)
+            st.markdown("### 🧾 Comparativa final: LOG vs CERTIFICADO vs EXCEL")
+            st.dataframe(df_cmp, use_container_width=True, hide_index=True)
+            buf_cmp = io.BytesIO()
+            df_cmp.to_excel(buf_cmp, index=False, engine="openpyxl")
+            st.download_button("⬇️ Descargar comparativa en Excel", data=buf_cmp.getvalue(),
+                               file_name=f"comparativa_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx", key="dl_cmp")
+        except Exception as e:
+            st.error(f"No se pudo leer el Excel manual: {e}")
 
 # ================= CONVERSOR DE CERTIFICADOS (PDF → EXCEL) =================
 st.divider()
