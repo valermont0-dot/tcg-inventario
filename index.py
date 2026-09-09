@@ -601,6 +601,7 @@ else:
     st.sidebar.caption(f"🔎 Tu vista: PO {po_vista or 'personal'}")
 
 archivo_cliente = st.sidebar.file_uploader("📂 Subir base del cliente (PO)", type=["xlsx", "xls", "xlsm", "csv", "pdf"])
+importar_tabla = st.sidebar.checkbox("También importar estos seriales a la TABLA CAPTURA (úsalo solo si es TU hoja de escaneo inicial)", value=False)
 if archivo_cliente:
     st.session_state["archivo_bytes"] = archivo_cliente.getvalue()
     st.session_state["archivo_nombre"] = archivo_cliente.name
@@ -640,36 +641,37 @@ if st.session_state.get("recargar_po") and st.session_state.get("archivo_bytes")
             hoja_usada = xls.sheet_names[idx_po] if idx_po is not None else xls.sheet_names[0]
             dfc_nueva = xls.parse(hoja_usada, header=skip_po - 1, dtype=str)
 
-            col_imp = col_por_palabras(dfc_nueva, ["serial", "service", "tag", "serie"]) or detectar_col_serial(dfc_nueva)
-            col_mar = col_por_palabras(dfc_nueva, ["marca", "brand", "manufacturer"])
-            col_mod = col_por_palabras(dfc_nueva, ["modelo", "model"])
-            col_tip = col_por_palabras(dfc_nueva, ["tipo", "type", "arquitectura"])
-            col_cos = col_por_palabras(dfc_nueva, ["costumer", "customer", "cliente"])
-            if col_imp:
-                existentes = set(st.session_state.df["Serial"])
-                nuevas = []
-                for _, r in dfc_nueva.iterrows():
-                    s = limpiar_serial(r[col_imp])
-                    if longitud_ok(s) and s not in existentes:
-                        existentes.add(s)
-                        marca = str(r[col_mar]).strip().upper() if col_mar else ""
-                        if marca == "NAN":
-                            marca = ""
-                        modelo = str(r[col_mod]).strip() if col_mod else ""
-                        if modelo == "nan":
-                            modelo = ""
-                        tipo = str(r[col_tip]).strip().upper() if col_tip else ""
-                        if tipo == "NAN":
-                            tipo = ""
-                        costumer = str(r[col_cos]).strip().upper() if col_cos else ""
-                        if costumer == "NAN":
-                            costumer = ""
-                        nuevas.append({"Serial": s, "Costumer": costumer, "Marca": marca, "Modelo": modelo,
-                                       "Tipo": tipo, "Status": "Escaneo inicial", "PO": st.session_state.po_actual or "IMPORTADO",
-                                       "Usuario": st.session_state.usuario, "Fecha": datetime.now().strftime("%Y-%m-%d %H:%M")})
-                if nuevas:
-                    st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(nuevas)], ignore_index=True)
-                    guardar_datos(st.session_state.df)
+            if importar_tabla:
+                col_imp = col_por_palabras(dfc_nueva, ["serial", "service", "tag", "serie"]) or detectar_col_serial(dfc_nueva)
+                col_mar = col_por_palabras(dfc_nueva, ["marca", "brand", "manufacturer"])
+                col_mod = col_por_palabras(dfc_nueva, ["modelo", "model"])
+                col_tip = col_por_palabras(dfc_nueva, ["tipo", "type", "arquitectura"])
+                col_cos = col_por_palabras(dfc_nueva, ["costumer", "customer", "cliente"])
+                if col_imp:
+                    existentes = set(st.session_state.df["Serial"])
+                    nuevas = []
+                    for _, r in dfc_nueva.iterrows():
+                        s = limpiar_serial(r[col_imp])
+                        if longitud_ok(s) and s not in existentes:
+                            existentes.add(s)
+                            marca = str(r[col_mar]).strip().upper() if col_mar else ""
+                            if marca == "NAN":
+                                marca = ""
+                            modelo = str(r[col_mod]).strip() if col_mod else ""
+                            if modelo == "nan":
+                                modelo = ""
+                            tipo = str(r[col_tip]).strip().upper() if col_tip else ""
+                            if tipo == "NAN":
+                                tipo = ""
+                            costumer = str(r[col_cos]).strip().upper() if col_cos else ""
+                            if costumer == "NAN":
+                                costumer = ""
+                            nuevas.append({"Serial": s, "Costumer": costumer, "Marca": marca, "Modelo": modelo,
+                                           "Tipo": tipo, "Status": "Escaneo inicial", "PO": st.session_state.po_actual or "IMPORTADO",
+                                           "Usuario": st.session_state.usuario, "Fecha": datetime.now().strftime("%Y-%m-%d %H:%M")})
+                    if nuevas:
+                        st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(nuevas)], ignore_index=True)
+                        guardar_datos(st.session_state.df)
 
         col_det = col_por_palabras(dfc_nueva, ["serial", "service", "tag", "serie"]) or detectar_col_serial(dfc_nueva)
         if col_det is None and len(dfc_nueva.columns) > 0:
@@ -1181,8 +1183,15 @@ df_final = df_vista
 buffer = io.BytesIO()
 with pd.ExcelWriter(buffer, engine="openpyxl") as w:
     df_final.to_excel(w, index=False, sheet_name="TABLA_CAPTURA")
-bc.download_button("⬇️ Descargar Excel", buffer.getvalue(),
+st.caption("El botón descarga la TABLA CAPTURA tal como la ves ahora (tu vista/PO), con sus 14 columnas. Es tu respaldo en vivo; al cerrar el proyecto será tu tabla finalizada.")
+bc.download_button("⬇️ Descargar Excel (vista actual)", buffer.getvalue(),
                    file_name=f"inventario_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx")
+if es_admin:
+    buffer_all = io.BytesIO()
+    with pd.ExcelWriter(buffer_all, engine="openpyxl") as w:
+        df.to_excel(w, index=False, sheet_name="TABLA_COMPLETA")
+    st.download_button("📦 Descargar Excel COMPLETO (todas las POs, solo admin)", buffer_all.getvalue(),
+                       file_name=f"inventario_COMPLETO_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx")
 
 # ================= TABLA CAPTURA =================
 st.markdown("## 📋 TABLA CAPTURA")
