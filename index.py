@@ -842,13 +842,38 @@ else:
     r2.metric("📋 Declarados cliente", "sin base aún")
     r3.metric("⏳ Faltantes", "—")
 st.progress(min(progreso, 1.0))
-st.markdown("**Por tipo de equipo:**")
 orden_tipos = ["CPU", "LAPTOP", "MONITOR", "CELULAR", "TABLETA", "OTHER"]
 nombres_tipos = {"CPU": "CPU/PC", "LAPTOP": "Laptops", "MONITOR": "Monitores", "CELULAR": "Celulares", "TABLETA": "Tabletas", "OTHER": "Sin tipo aún"}
-vals_tipos = tipos_esc.value_counts().to_dict()
-cols_tipos = st.columns(len(orden_tipos))
-for c, t in zip(cols_tipos, orden_tipos):
-    c.metric(nombres_tipos[t], int(vals_tipos.get(t, 0)))
+
+# ================= ESTADO DEL PROYECTO (LÍNEAS, NO CUADROS) =================
+st.divider()
+st.markdown("## 📊 ESTADO DEL PROYECTO")
+st.caption(f"Vista actual: **{po_vista}** | Una línea por PO con su porcentaje. La comparación con el cliente SOLO aparece si hay base cargada.")
+if po_vista == "TODAS":
+    pos_a_mostrar = sorted(set(list(df["PO"]) + list(pos_cliente.keys())))
+elif po_vista:
+    pos_a_mostrar = [po_vista]
+else:
+    pos_a_mostrar = sorted(set(list(df_vista["PO"]) + list(pos_cliente.keys())))
+mostrado = False
+for po in pos_a_mostrar:
+    if not po or po == "SIN_PO":
+        continue
+    mostrado = True
+    dfpo = df[df["PO"] == po]
+    capt = len(dfpo)
+    decl = len(pos_cliente.get(po, []))
+    tipos_po = dfpo["Tipo"].map(lambda t: norm_tipo(t) if norm_tipo(t) else "OTHER").value_counts().to_dict()
+    linea_tipos = " · ".join([f"{nombres_tipos.get(t, t)}: {n}" for t, n in sorted(tipos_po.items(), key=lambda kv: -kv[1]) if n > 0]) or "sin tipos aún"
+    if decl:
+        pct = capt / decl
+        st.markdown(f"**{po}** — ✅ {capt} capturados de 📋 {decl} declarados → **{pct:.0%}** | ⏳ Faltan {max(decl - capt, 0)}")
+        st.progress(min(pct, 1.0))
+    else:
+        st.markdown(f"**{po}** — ✅ {capt} capturados | 📋 sin base del cliente aún (el porcentaje aparecerá al subirla)")
+    st.caption(f"Tipos: {linea_tipos}")
+if not mostrado:
+    st.info("Sin POs con datos en esta vista.")
 
 # ================= REGISTRO DE POs (SOLO ADMIN) =================
 if es_admin:
@@ -878,48 +903,6 @@ if es_admin:
     else:
         st.info("Aún no hay POs registradas. El admin puede crear una en la barra lateral.")
 
-# ================= GRÁFICAS CLARAS DEL PROYECTO =================
-st.divider()
-st.markdown("## 📈 GRÁFICAS DEL PROYECTO")
-st.caption(f"Vista actual: **{po_vista}** | Lo esencial: cuántos por PO, qué tipos hay y avance contra el cliente.")
-if not PLOTLY_OK:
-    st.warning("Falta plotly para las gráficas. Ejecuta: pip install plotly")
-elif len(df_vista) == 0:
-    st.info("Sin datos para graficar en esta vista.")
-else:
-    dfv = df_vista.copy()
-    c1, c2 = st.columns(2)
-    with c1:
-        por_po = dfv.groupby("PO").size().reset_index(name="Capturados")
-        fig1 = px.bar(por_po, x="PO", y="Capturados", text="Capturados", color_discrete_sequence=["#1f77b4"])
-        fig1.update_traces(textposition="outside")
-        fig1.update_layout(height=350, margin=dict(l=10, r=10, t=40, b=10),
-                           title="Capturas por PO", xaxis_title=None, yaxis_title="Equipos")
-        st.plotly_chart(fig1, use_container_width=True)
-    with c2:
-        tmp2 = tipos_esc.value_counts().reset_index()
-        tmp2.columns = ["Tipo", "Equipos"]
-        tmp2 = tmp2[tmp2["Equipos"] > 0].sort_values("Equipos", ascending=False)
-        tmp2["Tipo"] = tmp2["Tipo"].map(lambda t: nombres_tipos.get(t, t))
-        fig2 = px.bar(tmp2, x="Tipo", y="Equipos", text="Equipos", color_discrete_sequence=["#2ca02c"])
-        fig2.update_traces(textposition="outside")
-        fig2.update_layout(height=350, margin=dict(l=10, r=10, t=40, b=10),
-                           title="Qué tipos hay (del más al menos)", xaxis_title=None, yaxis_title="Equipos")
-        st.plotly_chart(fig2, use_container_width=True)
-    rows_po2 = []
-    for po in sorted(set(list(dfv["PO"]) + list(pos_cliente.keys()))):
-        if not po or po == "SIN_PO":
-            continue
-        rows_po2.append({"PO": po, "Capturados": len(dfv[dfv["PO"] == po]), "Declarados cliente": len(pos_cliente.get(po, []))})
-    dfp2 = pd.DataFrame(rows_po2)
-    if len(dfp2) and dfp2["Declarados cliente"].sum() > 0:
-        fig3 = px.bar(dfp2, x="PO", y=["Capturados", "Declarados cliente"], barmode="group", text_auto=True,
-                      color_discrete_sequence=["#2ca02c", "#7f7f7f"])
-        fig3.update_layout(height=350, margin=dict(l=10, r=10, t=40, b=10),
-                           title="Avance contra el cliente por PO", xaxis_title=None, yaxis_title="Equipos")
-        st.plotly_chart(fig3, use_container_width=True)
-    else:
-        st.info("Aún no hay base del cliente: cuando la subas, aquí verás capturados vs declarados por PO.")
 # ================= SUPERVISIÓN + USUARIOS (SOLO ADMIN) =================
 if es_admin:
     st.divider()
