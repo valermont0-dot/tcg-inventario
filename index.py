@@ -640,22 +640,36 @@ if st.session_state.get("recargar_po") and st.session_state.get("archivo_bytes")
             hoja_usada = xls.sheet_names[idx_po] if idx_po is not None else xls.sheet_names[0]
             dfc_nueva = xls.parse(hoja_usada, header=skip_po - 1, dtype=str)
 
-            if "TABLA_CAPTURA" in hojas:
-                dft = xls.parse(xls.sheet_names[hojas.index("TABLA_CAPTURA")], header=5, dtype=str)
-                col_ser = col_por_palabras(dft, ["serial", "interno"]) or detectar_col_serial(dft)
-                if col_ser:
-                    existentes = set(st.session_state.df["Serial"])
-                    nuevas = []
-                    for _, r in dft.iterrows():
-                        s = limpiar_serial(r[col_ser])
-                        if longitud_ok(s) and s not in existentes:
-                            existentes.add(s)
-                            nuevas.append({"Serial": s, "Costumer": "", "Marca": detectar_marca(s), "Modelo": "",
-                                           "Tipo": "", "Status": "Importado de Excel", "PO": st.session_state.po_actual or "IMPORTADO",
-                                           "Usuario": st.session_state.usuario, "Fecha": datetime.now().strftime("%Y-%m-%d %H:%M")})
-                    if nuevas:
-                        st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(nuevas)], ignore_index=True)
-                        guardar_datos(st.session_state.df)
+            col_imp = col_por_palabras(dfc_nueva, ["serial", "service", "tag", "serie"]) or detectar_col_serial(dfc_nueva)
+            col_mar = col_por_palabras(dfc_nueva, ["marca", "brand", "manufacturer"])
+            col_mod = col_por_palabras(dfc_nueva, ["modelo", "model"])
+            col_tip = col_por_palabras(dfc_nueva, ["tipo", "type", "arquitectura"])
+            col_cos = col_por_palabras(dfc_nueva, ["costumer", "customer", "cliente"])
+            if col_imp:
+                existentes = set(st.session_state.df["Serial"])
+                nuevas = []
+                for _, r in dfc_nueva.iterrows():
+                    s = limpiar_serial(r[col_imp])
+                    if longitud_ok(s) and s not in existentes:
+                        existentes.add(s)
+                        marca = str(r[col_mar]).strip().upper() if col_mar else ""
+                        if marca in ("", "NAN"):
+                            marca = detectar_marca(s)
+                        modelo = str(r[col_mod]).strip() if col_mod else ""
+                        if modelo == "nan":
+                            modelo = ""
+                        tipo = str(r[col_tip]).strip().upper() if col_tip else ""
+                        if tipo in ("", "NAN"):
+                            tipo = detectar_tipo(modelo) if modelo else ""
+                        costumer = str(r[col_cos]).strip().upper() if col_cos else ""
+                        if costumer == "NAN":
+                            costumer = ""
+                        nuevas.append({"Serial": s, "Costumer": costumer, "Marca": marca, "Modelo": modelo,
+                                       "Tipo": tipo, "Status": "Escaneo inicial", "PO": st.session_state.po_actual or "IMPORTADO",
+                                       "Usuario": st.session_state.usuario, "Fecha": datetime.now().strftime("%Y-%m-%d %H:%M")})
+                if nuevas:
+                    st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(nuevas)], ignore_index=True)
+                    guardar_datos(st.session_state.df)
 
         col_det = col_por_palabras(dfc_nueva, ["serial", "service", "tag", "serie"]) or detectar_col_serial(dfc_nueva)
         if col_det is None and len(dfc_nueva.columns) > 0:
@@ -817,53 +831,52 @@ if dfc is not None and col_tipo_cliente:
 
 progreso = (interno / cliente) if cliente else 0
 
-# ================= DATOS TOTALES =================
-st.markdown("## 📊 DATOS TOTALES")
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Equipos Interno", interno)
-c2.metric("Equipos Cliente", cliente if cliente else "—")
-c3.metric("Restantes", max(cliente - interno, 0) if cliente else "—")
-c4.metric("Progreso", f"{progreso:.0%}")
-st.progress(min(progreso, 1.0))
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Coinciden", coinciden)
-c2.metric("No coinciden", no_coinciden)
-c3.metric("PC Escaneada", pc_esc)
-c4.metric("PC Total PO Cliente", pc_cli if cliente else "—")
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Laptops Escaneada", lap_esc)
-c2.metric("Laptop Total PO Cliente", lap_cli if cliente else "—")
-c3.metric("Others Escaneada", oth_esc)
-c4.metric("Other Cliente", oth_cli if cliente else "—")
-
-# ================= REGISTRO DE POs =================
-st.divider()
-st.markdown("## 📋 REGISTRO DE POs (estado de proyectos)")
-st.caption("Libro de proyectos: qué POs están iniciadas, quién las inició, a quién están asignadas, quién las tomó, si tienen base y su avance.")
-rows_reg = []
-for po in sorted(set(list(pos_reg.keys()) + list(set(df["PO"])))):
-    if not po or po == "SIN_PO":
-        continue
-    info = pos_reg.get(po, {})
-    capt = len(df[df["PO"] == po])
-    decl = info.get("declarados", 0) or len(pos_cliente.get(po, []))
-    rows_reg.append({
-        "PO": po,
-        "Iniciada": info.get("inicio", "sin registrar"),
-        "Por": info.get("usuario", "—"),
-        "Asignada a": info.get("asignada_a") or "— libre —",
-        "Tomada por": info.get("tomada_por") or "— nadie aún —",
-        "Base cliente": f"CON BASE ({decl})" if (info.get("con_base") or po in pos_cliente) else "SIN BASE (desde cero)",
-        "Capturados": capt,
-        "Avance": f"{capt / decl:.0%}" if decl else "—",
-        "Estado": info.get("estado", "ABIERTA"),
-    })
-if rows_reg:
-    st.dataframe(pd.DataFrame(rows_reg), use_container_width=True, hide_index=True)
+# ================= RESUMEN DE LA PO (SIMPLE) =================
+st.markdown("## 📊 RESUMEN DE LA PO")
+r1, r2, r3 = st.columns(3)
+r1.metric("✅ Capturados", interno)
+if cliente:
+    r2.metric("📋 Declarados cliente", cliente)
+    r3.metric("⏳ Faltantes", max(cliente - interno, 0))
 else:
-    st.info("Aún no hay POs registradas. El admin puede crear una en la barra lateral.")
+    r2.metric("📋 Declarados cliente", "sin base aún")
+    r3.metric("⏳ Faltantes", "—")
+st.progress(min(progreso, 1.0))
+st.markdown("**Por tipo de equipo:**")
+orden_tipos = ["CPU", "LAPTOP", "MONITOR", "CELULAR", "TABLETA", "OTHER"]
+nombres_tipos = {"CPU": "CPU/PC", "LAPTOP": "Laptops", "MONITOR": "Monitores", "CELULAR": "Celulares", "TABLETA": "Tabletas", "OTHER": "Otros/Sin tipo"}
+vals_tipos = tipos_esc.value_counts().to_dict()
+cols_tipos = st.columns(len(orden_tipos))
+for c, t in zip(cols_tipos, orden_tipos):
+    c.metric(nombres_tipos[t], int(vals_tipos.get(t, 0)))
+
+# ================= REGISTRO DE POs (SOLO ADMIN) =================
+if es_admin:
+    st.divider()
+    st.markdown("## 📋 REGISTRO DE POs (estado de proyectos)")
+    st.caption("Libro de proyectos: qué POs están iniciadas, quién las inició, a quién están asignadas, quién las tomó, si tienen base y su avance.")
+    rows_reg = []
+    for po in sorted(set(list(pos_reg.keys()) + list(set(df["PO"])))):
+        if not po or po == "SIN_PO":
+            continue
+        info = pos_reg.get(po, {})
+        capt = len(df[df["PO"] == po])
+        decl = info.get("declarados", 0) or len(pos_cliente.get(po, []))
+        rows_reg.append({
+            "PO": po,
+            "Iniciada": info.get("inicio", "sin registrar"),
+            "Por": info.get("usuario", "—"),
+            "Asignada a": info.get("asignada_a") or "— libre —",
+            "Tomada por": info.get("tomada_por") or "— nadie aún —",
+            "Base cliente": f"CON BASE ({decl})" if (info.get("con_base") or po in pos_cliente) else "SIN BASE (desde cero)",
+            "Capturados": capt,
+            "Avance": f"{capt / decl:.0%}" if decl else "—",
+            "Estado": info.get("estado", "ABIERTA"),
+        })
+    if rows_reg:
+        st.dataframe(pd.DataFrame(rows_reg), use_container_width=True, hide_index=True)
+    else:
+        st.info("Aún no hay POs registradas. El admin puede crear una en la barra lateral.")
 
 # ================= ESTADÍSTICAS Y GRÁFICAS =================
 st.divider()
@@ -1225,16 +1238,45 @@ bc.download_button("⬇️ Descargar Excel", buffer.getvalue(),
 
 # ================= TABLA CAPTURA =================
 st.markdown("## 📋 TABLA CAPTURA")
+es_tomador = False
+if st.session_state.po_actual:
+    es_tomador = pos_reg.get(st.session_state.po_actual, {}).get("tomada_por", "") == st.session_state.usuario
 if es_admin:
-    st.caption("Edita Modelo, Tipo, Costumer o PO directamente aquí si necesitas corregir algo.")
+    st.caption("Edita Modelo, Tipo, Costumer, Marca o corrige seriales de cualquier PO aquí.")
     df_editado = st.data_editor(st.session_state.df, use_container_width=True, hide_index=True, num_rows="dynamic")
     if st.button("💾 Guardar cambios de la tabla"):
         st.session_state.df = df_editado.fillna("")
         guardar_datos(st.session_state.df)
         st.success("Cambios guardados ✅")
         st.rerun()
+elif es_tomador:
+    st.caption("Tú tomaste esta PO: puedes editar y agregar renglones de TU PO aquí.")
+    df_editado = st.data_editor(df_vista, use_container_width=True, hide_index=True, num_rows="dynamic")
+    if st.button("💾 Guardar cambios de mi PO"):
+        edit = df_editado.fillna("")
+        existentes = set(st.session_state.df["Serial"])
+        mapa = {str(r["Serial"]).strip().upper(): r for _, r in edit.iterrows()}
+        for i, row in st.session_state.df.iterrows():
+            if str(row["Serial"]).strip().upper() in mapa:
+                st.session_state.df.loc[i] = mapa[str(row["Serial"]).strip().upper()]
+        nuevas = []
+        for _, r in edit.iterrows():
+            s = str(r["Serial"]).strip().upper()
+            if s and s not in existentes:
+                r2 = r.copy()
+                r2["PO"] = st.session_state.po_actual
+                r2["Usuario"] = st.session_state.usuario
+                if not str(r2["Fecha"]).strip() or str(r2["Fecha"]) == "nan":
+                    r2["Fecha"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                nuevas.append(r2)
+                existentes.add(s)
+        if nuevas:
+            st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(nuevas)], ignore_index=True)
+        guardar_datos(st.session_state.df)
+        st.success("Cambios guardados ✅")
+        st.rerun()
 else:
-    st.caption(f"Viendo únicamente tu PO: **{st.session_state.po_actual or 'tu captura'}** (solo lectura; captura en las pestañas de arriba).")
+    st.caption(f"Viendo únicamente tu PO: **{st.session_state.po_actual or 'tu captura'}** (solo lectura).")
     st.dataframe(df_vista, use_container_width=True, hide_index=True)
 
 # ================= FASE 2: LOGS XERASE =================
@@ -1382,7 +1424,6 @@ if cert_files:
     elif discos_cert:
         st.success("✅ Todos los discos de tus logs aparecen en el certificado. Cotejo completo.")
 
-    # ---------- COMPARATIVA DE 3 VÍAS: LOG vs CERTIFICADO vs EXCEL ----------
     if excel_manual is not None and cert_map:
         try:
             dfm = pd.read_excel(io.BytesIO(excel_manual.getvalue()), dtype=str)
