@@ -873,7 +873,10 @@ for po in pos_a_mostrar:
         st.progress(min(pct, 1.0))
     else:
         st.markdown(f"**{po}** — ✅ {capt} capturados | 📋 sin base del cliente aún (el porcentaje aparecerá al subirla)")
+    marcas_po = dfpo["Marca"].map(lambda m: str(m).strip().upper() if str(m).strip() and str(m) != "nan" else "SIN MARCA").value_counts().to_dict()
+    linea_marcas = " · ".join([f"{m}: {n}" for m, n in sorted(marcas_po.items(), key=lambda kv: -kv[1]) if n > 0]) or "sin marcas aún"
     st.caption(f"Tipos: {linea_tipos}")
+    st.caption(f"Marcas: {linea_marcas}")
 if not mostrado:
     st.info("Sin POs con datos en esta vista.")
 
