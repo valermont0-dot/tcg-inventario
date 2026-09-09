@@ -653,14 +653,14 @@ if st.session_state.get("recargar_po") and st.session_state.get("archivo_bytes")
                     if longitud_ok(s) and s not in existentes:
                         existentes.add(s)
                         marca = str(r[col_mar]).strip().upper() if col_mar else ""
-                        if marca in ("", "NAN"):
-                            marca = detectar_marca(s)
+                        if marca == "NAN":
+                            marca = ""
                         modelo = str(r[col_mod]).strip() if col_mod else ""
                         if modelo == "nan":
                             modelo = ""
                         tipo = str(r[col_tip]).strip().upper() if col_tip else ""
-                        if tipo in ("", "NAN"):
-                            tipo = detectar_tipo(modelo) if modelo else ""
+                        if tipo == "NAN":
+                            tipo = ""
                         costumer = str(r[col_cos]).strip().upper() if col_cos else ""
                         if costumer == "NAN":
                             costumer = ""
@@ -817,7 +817,7 @@ else:
     coinciden = "—"
     no_coinciden = "—"
 
-tipos_esc = df_vista["Tipo"].map(norm_tipo)
+tipos_esc = df_vista["Tipo"].map(lambda t: norm_tipo(t) if norm_tipo(t) else "OTHER")
 pc_esc = int((tipos_esc == "CPU").sum())
 lap_esc = int((tipos_esc == "LAPTOP").sum())
 oth_esc = int(tipos_esc.isin(["OTHER", "MONITOR", "CELULAR", "TABLETA"]).sum())
@@ -844,7 +844,7 @@ else:
 st.progress(min(progreso, 1.0))
 st.markdown("**Por tipo de equipo:**")
 orden_tipos = ["CPU", "LAPTOP", "MONITOR", "CELULAR", "TABLETA", "OTHER"]
-nombres_tipos = {"CPU": "CPU/PC", "LAPTOP": "Laptops", "MONITOR": "Monitores", "CELULAR": "Celulares", "TABLETA": "Tabletas", "OTHER": "Otros/Sin tipo"}
+nombres_tipos = {"CPU": "CPU/PC", "LAPTOP": "Laptops", "MONITOR": "Monitores", "CELULAR": "Celulares", "TABLETA": "Tabletas", "OTHER": "Sin tipo aún"}
 vals_tipos = tipos_esc.value_counts().to_dict()
 cols_tipos = st.columns(len(orden_tipos))
 for c, t in zip(cols_tipos, orden_tipos):
@@ -878,10 +878,10 @@ if es_admin:
     else:
         st.info("Aún no hay POs registradas. El admin puede crear una en la barra lateral.")
 
-# ================= ESTADÍSTICAS Y GRÁFICAS =================
+# ================= GRÁFICAS RÁPIDAS (SOLO 2, LIMPIAS) =================
 st.divider()
-st.markdown("## 📈 ESTADÍSTICAS Y GRÁFICAS")
-st.caption(f"Vista actual: **{po_vista}** | Todo lo de abajo se filtra según la PO seleccionada.")
+st.markdown("## 📈 GRÁFICAS RÁPIDAS")
+st.caption(f"Vista actual: **{po_vista}**")
 if not PLOTLY_OK:
     st.warning("Falta plotly para las gráficas. Ejecuta: pip install plotly")
 elif len(df_vista) == 0:
@@ -889,75 +889,20 @@ elif len(df_vista) == 0:
 else:
     dfv = df_vista.copy()
     dfv["Dia"] = dfv["Fecha"].str[:10]
-    dias = dfv["Dia"].nunique()
-    promedio = len(dfv) / dias if dias else 0
-    por_dia = dfv.groupby("Dia").size().reset_index(name="Equipos")
-    mejor = por_dia.loc[por_dia["Equipos"].idxmax()] if len(por_dia) else None
-    g1, g2, g3, g4 = st.columns(4)
-    g1.metric("Días activos", dias)
-    g2.metric("Promedio por día", f"{promedio:.1f}")
-    g3.metric("Mejor día", mejor["Dia"] if mejor is not None else "—")
-    g4.metric("Equipos ese día", int(mejor["Equipos"]) if mejor is not None else 0)
-
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("**Capturas por día**")
-        fig = px.bar(por_dia, x="Dia", y="Equipos", color="Equipos", color_continuous_scale="Blues")
-        fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+        por_dia = dfv.groupby("Dia").size().reset_index(name="Equipos")
+        fig = px.bar(por_dia, x="Dia", y="Equipos", color_discrete_sequence=["#1f77b4"])
+        fig.update_layout(height=300, margin=dict(l=10, r=10, t=40, b=10), title="Capturas por día")
         st.plotly_chart(fig, use_container_width=True)
     with c2:
-        st.markdown("**Avance acumulado**")
-        acum = dfv.groupby("Dia").size().cumsum().reset_index(name="Acumulado")
-        fig2 = px.line(acum, x="Dia", y="Acumulado", markers=True)
-        fig2.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig2, use_container_width=True)
-
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown("**Por marca**")
-        tmp = dfv["Marca"].value_counts().reset_index()
-        tmp.columns = ["Marca", "Equipos"]
-        fig3 = px.pie(tmp, names="Marca", values="Equipos", hole=0.55)
-        fig3.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig3, use_container_width=True)
-    with c2:
-        st.markdown("**Por tipo de equipo**")
-        tmp2 = dfv["Tipo"].replace("", "SIN TIPO").value_counts().reset_index()
+        tmp2 = tipos_esc.value_counts().reset_index()
         tmp2.columns = ["Tipo", "Equipos"]
-        fig4 = px.bar(tmp2, x="Tipo", y="Equipos", color="Tipo")
-        fig4.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
+        tmp2 = tmp2[tmp2["Equipos"] > 0]
+        tmp2["Tipo"] = tmp2["Tipo"].map(lambda t: nombres_tipos.get(t, t))
+        fig4 = px.bar(tmp2, x="Tipo", y="Equipos", color_discrete_sequence=["#2ca02c"])
+        fig4.update_layout(height=300, margin=dict(l=10, r=10, t=40, b=10), title="Equipos por tipo")
         st.plotly_chart(fig4, use_container_width=True)
-    with c3:
-        st.markdown("**Status de captura**")
-        tmp3 = dfv["Status"].value_counts().reset_index()
-        tmp3.columns = ["Status", "Equipos"]
-        fig5 = px.pie(tmp3, names="Status", values="Equipos", hole=0.55)
-        fig5.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig5, use_container_width=True)
-
-    st.markdown("**Avance por PO (procesados vs declarados)**")
-    rows_po = []
-    for po in sorted(set(list(dfv["PO"]) + list(pos_cliente.keys()))):
-        if po in ("", "SIN_PO"):
-            continue
-        rows_po.append({
-            "PO": po,
-            "Procesados": len(dfv[dfv["PO"] == po]),
-            "Declarados": len(pos_cliente.get(po, [])),
-        })
-    if rows_po:
-        fig6 = px.bar(pd.DataFrame(rows_po), x="PO", y=["Procesados", "Declarados"], barmode="group",
-                      color_discrete_sequence=["#2ca02c", "#7f7f7f"])
-        fig6.update_layout(height=340, margin=dict(l=10, r=10, t=10, b=10))
-        st.plotly_chart(fig6, use_container_width=True)
-
-    if es_admin:
-        st.markdown("**Rendimiento por usuario**")
-        tmp4 = dfv["Usuario"].value_counts().reset_index()
-        tmp4.columns = ["Usuario", "Equipos"]
-        fig7 = px.bar(tmp4, x="Usuario", y="Equipos", color="Usuario")
-        fig7.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
-        st.plotly_chart(fig7, use_container_width=True)
 
 # ================= SUPERVISIÓN + USUARIOS (SOLO ADMIN) =================
 if es_admin:
@@ -1119,7 +1064,7 @@ with tab1:
             if po_nueva != "SIN_PO":
                 registrar_po(po_nueva, st.session_state.usuario)
             nueva = pd.DataFrame([{
-                "Serial": serial, "Costumer": costumer_txt.strip().upper(), "Marca": detectar_marca(serial),
+                "Serial": serial, "Costumer": costumer_txt.strip().upper(), "Marca": "",
                 "Modelo": "", "Tipo": "", "Status": status_nuevo, "PO": po_nueva,
                 "Usuario": st.session_state.usuario, "Fecha": datetime.now().strftime("%Y-%m-%d %H:%M")
             }])
@@ -1138,7 +1083,7 @@ with tab1:
             elif status_nuevo == "No está en PO":
                 st.warning(f"⚠️ {serial} registrado en '{po_nueva}', pero NO está en la PO del cliente.")
             else:
-                st.success(f"✅ {serial} registrado en PO '{po_nueva}' ({detectar_marca(serial)})")
+                st.success(f"✅ {serial} registrado en PO '{po_nueva}' — listo para que llenes sus datos")
             st.rerun()
 
 with tab2:
@@ -1151,6 +1096,7 @@ with tab2:
         existentes = set(df["Serial"])
         nuevas = []
         ok = dup = mal = 0
+        dup_list = []
         po_nueva = st.session_state.po_actual or "SIN_PO"
         if po_nueva != "SIN_PO":
             registrar_po(po_nueva, st.session_state.usuario)
@@ -1161,12 +1107,13 @@ with tab2:
                 continue
             if serial in existentes:
                 fila = df[df["Serial"] == serial].iloc[0]
+                dup_list.append(f"{serial} (ya está en {fila['PO'] or 'SIN_PO'})")
                 if (fila["PO"] or "SIN_PO") != po_nueva:
                     agregar_alerta(serial, st.session_state.usuario, po_nueva, fila["PO"] or "SIN_PO", "DUPLICADO_OTRA_PO")
                 dup += 1
                 continue
             existentes.add(serial)
-            nuevas.append({"Serial": serial, "Costumer": "", "Marca": detectar_marca(serial), "Modelo": "",
+            nuevas.append({"Serial": serial, "Costumer": "", "Marca": "", "Modelo": "",
                            "Tipo": "", "Status": "Pendiente", "PO": po_nueva,
                            "Usuario": st.session_state.usuario, "Fecha": datetime.now().strftime("%Y-%m-%d %H:%M")})
             entrada = historial.get(serial, {"pos": [], "primera": datetime.now().strftime("%Y-%m-%d %H:%M"), "usuario": st.session_state.usuario})
@@ -1178,7 +1125,9 @@ with tab2:
             st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(nuevas)], ignore_index=True)
             guardar_datos(st.session_state.df)
             guardar_json(ARCHIVO_HISTORIAL, historial)
-        st.success(f"✅ Registrados en PO '{po_nueva}': {ok} | ❌ Duplicados: {dup} | ⚠️ Vacíos: {mal}")
+        st.success(f"✅ Registrados en PO '{po_nueva}': {ok} | ⚠️ Vacíos: {mal}")
+        if dup_list:
+            st.error(f"🚨 NO se registraron {dup} duplicados: {', '.join(dup_list)}")
         st.rerun()
 
 # ================= BOTONES DE ACCIÓN =================
@@ -1242,39 +1191,58 @@ es_tomador = False
 if st.session_state.po_actual:
     es_tomador = pos_reg.get(st.session_state.po_actual, {}).get("tomada_por", "") == st.session_state.usuario
 if es_admin:
-    st.caption("Edita Modelo, Tipo, Costumer, Marca o corrige seriales de cualquier PO aquí.")
+    st.caption("Edita Marca, Modelo, Tipo, Costumer o corrige seriales de cualquier PO aquí.")
     df_editado = st.data_editor(st.session_state.df, use_container_width=True, hide_index=True, num_rows="dynamic")
     if st.button("💾 Guardar cambios de la tabla"):
-        st.session_state.df = df_editado.fillna("")
-        guardar_datos(st.session_state.df)
-        st.success("Cambios guardados ✅")
-        st.rerun()
+        edit = df_editado.fillna("")
+        seriales_edit = [str(s).strip().upper() for s in edit["Serial"] if str(s).strip()]
+        duplicados = sorted({s for s in seriales_edit if seriales_edit.count(s) > 1})
+        if duplicados:
+            st.error(f"⚠️ Seriales repetidos dentro de la tabla: {', '.join(duplicados)}. No se guardó nada.")
+        else:
+            st.session_state.df = edit
+            guardar_datos(st.session_state.df)
+            st.success("Cambios guardados ✅")
+            st.rerun()
 elif es_tomador:
     st.caption("Tú tomaste esta PO: puedes editar y agregar renglones de TU PO aquí.")
     df_editado = st.data_editor(df_vista, use_container_width=True, hide_index=True, num_rows="dynamic")
     if st.button("💾 Guardar cambios de mi PO"):
         edit = df_editado.fillna("")
-        existentes = set(st.session_state.df["Serial"])
-        mapa = {str(r["Serial"]).strip().upper(): r for _, r in edit.iterrows()}
-        for i, row in st.session_state.df.iterrows():
-            if str(row["Serial"]).strip().upper() in mapa:
-                st.session_state.df.loc[i] = mapa[str(row["Serial"]).strip().upper()]
-        nuevas = []
-        for _, r in edit.iterrows():
-            s = str(r["Serial"]).strip().upper()
-            if s and s not in existentes:
-                r2 = r.copy()
-                r2["PO"] = st.session_state.po_actual
-                r2["Usuario"] = st.session_state.usuario
-                if not str(r2["Fecha"]).strip() or str(r2["Fecha"]) == "nan":
-                    r2["Fecha"] = datetime.now().strftime("%Y-%m-%d %H:%M")
-                nuevas.append(r2)
-                existentes.add(s)
-        if nuevas:
-            st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(nuevas)], ignore_index=True)
-        guardar_datos(st.session_state.df)
-        st.success("Cambios guardados ✅")
-        st.rerun()
+        seriales_edit = [str(s).strip().upper() for s in edit["Serial"] if str(s).strip()]
+        duplicados = sorted({s for s in seriales_edit if seriales_edit.count(s) > 1})
+        vistas = {str(s).strip().upper() for s in df_vista["Serial"]}
+        todos = {str(s).strip().upper() for s in df["Serial"]}
+        foraneos = sorted({s for s in seriales_edit if s not in vistas and s in todos})
+        if duplicados:
+            st.error(f"⚠️ Serial repetido dentro de tu tabla: {', '.join(duplicados)}. No se guardó nada.")
+        elif foraneos:
+            for s in foraneos:
+                agregar_alerta(s, st.session_state.usuario, st.session_state.po_actual, "OTRA PO", "DUPLICADO_OTRA_PO")
+            st.error(f"🚨 Estos seriales ya existen en OTRA PO y no puedes meterlos a la tuya: {', '.join(foraneos)}. No se guardó nada.")
+        else:
+            existentes = set(st.session_state.df["Serial"])
+            mapa = {str(r["Serial"]).strip().upper(): r for _, r in edit.iterrows()}
+            for i, row in st.session_state.df.iterrows():
+                clave = str(row["Serial"]).strip().upper()
+                if clave in mapa and row["PO"] == st.session_state.po_actual:
+                    st.session_state.df.loc[i] = mapa[clave]
+            nuevas = []
+            for _, r in edit.iterrows():
+                s = str(r["Serial"]).strip().upper()
+                if s and s not in existentes:
+                    r2 = r.copy()
+                    r2["PO"] = st.session_state.po_actual
+                    r2["Usuario"] = st.session_state.usuario
+                    if not str(r2["Fecha"]).strip() or str(r2["Fecha"]) == "nan":
+                        r2["Fecha"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    nuevas.append(r2)
+                    existentes.add(s)
+            if nuevas:
+                st.session_state.df = pd.concat([st.session_state.df, pd.DataFrame(nuevas)], ignore_index=True)
+            guardar_datos(st.session_state.df)
+            st.success("Cambios guardados ✅")
+            st.rerun()
 else:
     st.caption(f"Viendo únicamente tu PO: **{st.session_state.po_actual or 'tu captura'}** (solo lectura).")
     st.dataframe(df_vista, use_container_width=True, hide_index=True)
