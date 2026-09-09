@@ -878,32 +878,48 @@ if es_admin:
     else:
         st.info("Aún no hay POs registradas. El admin puede crear una en la barra lateral.")
 
-# ================= GRÁFICAS RÁPIDAS (SOLO 2, LIMPIAS) =================
+# ================= GRÁFICAS CLARAS DEL PROYECTO =================
 st.divider()
-st.markdown("## 📈 GRÁFICAS RÁPIDAS")
-st.caption(f"Vista actual: **{po_vista}**")
+st.markdown("## 📈 GRÁFICAS DEL PROYECTO")
+st.caption(f"Vista actual: **{po_vista}** | Lo esencial: cuántos por PO, qué tipos hay y avance contra el cliente.")
 if not PLOTLY_OK:
     st.warning("Falta plotly para las gráficas. Ejecuta: pip install plotly")
 elif len(df_vista) == 0:
     st.info("Sin datos para graficar en esta vista.")
 else:
     dfv = df_vista.copy()
-    dfv["Dia"] = dfv["Fecha"].str[:10]
     c1, c2 = st.columns(2)
     with c1:
-        por_dia = dfv.groupby("Dia").size().reset_index(name="Equipos")
-        fig = px.bar(por_dia, x="Dia", y="Equipos", color_discrete_sequence=["#1f77b4"])
-        fig.update_layout(height=300, margin=dict(l=10, r=10, t=40, b=10), title="Capturas por día")
-        st.plotly_chart(fig, use_container_width=True)
+        por_po = dfv.groupby("PO").size().reset_index(name="Capturados")
+        fig1 = px.bar(por_po, x="PO", y="Capturados", text="Capturados", color_discrete_sequence=["#1f77b4"])
+        fig1.update_traces(textposition="outside")
+        fig1.update_layout(height=350, margin=dict(l=10, r=10, t=40, b=10),
+                           title="Capturas por PO", xaxis_title=None, yaxis_title="Equipos")
+        st.plotly_chart(fig1, use_container_width=True)
     with c2:
         tmp2 = tipos_esc.value_counts().reset_index()
         tmp2.columns = ["Tipo", "Equipos"]
-        tmp2 = tmp2[tmp2["Equipos"] > 0]
+        tmp2 = tmp2[tmp2["Equipos"] > 0].sort_values("Equipos", ascending=False)
         tmp2["Tipo"] = tmp2["Tipo"].map(lambda t: nombres_tipos.get(t, t))
-        fig4 = px.bar(tmp2, x="Tipo", y="Equipos", color_discrete_sequence=["#2ca02c"])
-        fig4.update_layout(height=300, margin=dict(l=10, r=10, t=40, b=10), title="Equipos por tipo")
-        st.plotly_chart(fig4, use_container_width=True)
-
+        fig2 = px.bar(tmp2, x="Tipo", y="Equipos", text="Equipos", color_discrete_sequence=["#2ca02c"])
+        fig2.update_traces(textposition="outside")
+        fig2.update_layout(height=350, margin=dict(l=10, r=10, t=40, b=10),
+                           title="Qué tipos hay (del más al menos)", xaxis_title=None, yaxis_title="Equipos")
+        st.plotly_chart(fig2, use_container_width=True)
+    rows_po2 = []
+    for po in sorted(set(list(dfv["PO"]) + list(pos_cliente.keys()))):
+        if not po or po == "SIN_PO":
+            continue
+        rows_po2.append({"PO": po, "Capturados": len(dfv[dfv["PO"] == po]), "Declarados cliente": len(pos_cliente.get(po, []))})
+    dfp2 = pd.DataFrame(rows_po2)
+    if len(dfp2) and dfp2["Declarados cliente"].sum() > 0:
+        fig3 = px.bar(dfp2, x="PO", y=["Capturados", "Declarados cliente"], barmode="group", text_auto=True,
+                      color_discrete_sequence=["#2ca02c", "#7f7f7f"])
+        fig3.update_layout(height=350, margin=dict(l=10, r=10, t=40, b=10),
+                           title="Avance contra el cliente por PO", xaxis_title=None, yaxis_title="Equipos")
+        st.plotly_chart(fig3, use_container_width=True)
+    else:
+        st.info("Aún no hay base del cliente: cuando la subas, aquí verás capturados vs declarados por PO.")
 # ================= SUPERVISIÓN + USUARIOS (SOLO ADMIN) =================
 if es_admin:
     st.divider()
@@ -1189,7 +1205,8 @@ bc.download_button("⬇️ Descargar Excel", buffer.getvalue(),
 st.markdown("## 📋 TABLA CAPTURA")
 es_tomador = False
 if st.session_state.po_actual:
-    es_tomador = pos_reg.get(st.session_state.po_actual, {}).get("tomada_por", "") == st.session_state.usuario
+    info_po_act = pos_reg.get(st.session_state.po_actual, {})
+    es_tomador = (info_po_act.get("tomada_por", "") == st.session_state.usuario) or (info_po_act.get("asignada_a", "") == st.session_state.usuario)
 if es_admin:
     st.caption("Edita Marca, Modelo, Tipo, Costumer o corrige seriales de cualquier PO aquí.")
     df_editado = st.data_editor(st.session_state.df, use_container_width=True, hide_index=True, num_rows="dynamic")
@@ -1205,7 +1222,7 @@ if es_admin:
             st.success("Cambios guardados ✅")
             st.rerun()
 elif es_tomador:
-    st.caption("Tú tomaste esta PO: puedes editar y agregar renglones de TU PO aquí.")
+    st.caption("Esta PO es tuya (la tomaste o te fue asignada): puedes editar y agregar renglones aquí. Nadie más puede.")
     df_editado = st.data_editor(df_vista, use_container_width=True, hide_index=True, num_rows="dynamic")
     if st.button("💾 Guardar cambios de mi PO"):
         edit = df_editado.fillna("")
