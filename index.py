@@ -288,15 +288,15 @@ def leer_certificado_por_posicion(doc):
 
 def leer_certificado_xerase(bytes_arch):
     doc = fitz.open(stream=bytes_arch, filetype="pdf")
-    debug = {"texto": 0, "tablas": 0}
-    for pagina in doc:
-        debug["texto"] += len(pagina.get_text())
+    resultados = []
     for estrategia in ["lines", "text"]:
         encabezados = None
         filas = []
         for pagina in doc:
-            tablas = pagina.find_tables(strategy=estrategia).tables
-            debug["tablas"] += len(tablas)
+            try:
+                tablas = pagina.find_tables(strategy=estrategia).tables
+            except Exception:
+                tablas = []
             for t in tablas:
                 for row in t.extract():
                     if not row or all(c is None for c in row):
@@ -308,12 +308,14 @@ def leer_certificado_xerase(bytes_arch):
                         continue
                     if encabezados and celdas and re.match(r'^\d{1,2}/\d{1,2}/\d{2,4}', celdas[0]):
                         filas.append(dict(zip(encabezados, celdas)))
-        if filas:
-            return filas, f"estrategia={estrategia}"
-    filas = leer_certificado_por_posicion(doc)
+        resultados.append((filas, f"estrategia={estrategia}"))
+    filas_pos = leer_certificado_por_posicion(doc)
+    resultados.append((filas_pos, "posicional"))
+    filas, metodo = max(resultados, key=lambda r: len(r[0]))
     if filas:
-        return filas, "posicional"
-    return [], f"texto={debug['texto']} tablas={debug['tablas']}"
+        return filas, metodo
+    texto_len = sum(len(p.get_text()) for p in doc)
+    return [], f"texto={texto_len} | métodos probados: lines, text, posicional (ninguno encontró filas)"
 
 def limpiar_filas_certificado(filas):
     limpias = []
@@ -867,14 +869,14 @@ for po in pos_a_mostrar:
     decl = len(pos_cliente.get(po, []))
     tipos_po = dfpo["Tipo"].map(lambda t: norm_tipo(t) if norm_tipo(t) else "OTHER").value_counts().to_dict()
     linea_tipos = " · ".join([f"{nombres_tipos.get(t, t)}: {n}" for t, n in sorted(tipos_po.items(), key=lambda kv: -kv[1]) if n > 0]) or "sin tipos aún"
+    marcas_po = dfpo["Marca"].map(lambda m: str(m).strip().upper() if str(m).strip() and str(m) != "nan" else "SIN MARCA").value_counts().to_dict()
+    linea_marcas = " · ".join([f"{m}: {n}" for m, n in sorted(marcas_po.items(), key=lambda kv: -kv[1]) if n > 0]) or "sin marcas aún"
     if decl:
         pct = capt / decl
         st.markdown(f"**{po}** — ✅ {capt} capturados de 📋 {decl} declarados → **{pct:.0%}** | ⏳ Faltan {max(decl - capt, 0)}")
         st.progress(min(pct, 1.0))
     else:
         st.markdown(f"**{po}** — ✅ {capt} capturados | 📋 sin base del cliente aún (el porcentaje aparecerá al subirla)")
-    marcas_po = dfpo["Marca"].map(lambda m: str(m).strip().upper() if str(m).strip() and str(m) != "nan" else "SIN MARCA").value_counts().to_dict()
-    linea_marcas = " · ".join([f"{m}: {n}" for m, n in sorted(marcas_po.items(), key=lambda kv: -kv[1]) if n > 0]) or "sin marcas aún"
     st.caption(f"Tipos: {linea_tipos}")
     st.caption(f"Marcas: {linea_marcas}")
 if not mostrado:
